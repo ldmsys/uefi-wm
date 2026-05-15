@@ -1,0 +1,15 @@
+[package]
+name    = "uefi-wm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "uefi_wm"
+path = "src/lib.rs"
+
+[dependencies]
+# Only the base alloc feature — panic_handler / global_allocator / logger are
+# the binary's responsibility and must not be registered twice.
+uefi     = { version = "0.33", features = ["alloc"] }
+uefi-raw = "0.9"
+fontdue  = { version = "0.9.3", default-features = false, features = ["hashbrown"] }
