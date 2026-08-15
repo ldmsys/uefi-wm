@@ -1,4 +1,4 @@
-//! Floating window manager — Windows 2000 visual style.
+//! Floating window manager with Classic, Light, and Dark themes.
 //!
 //! # Widget catalogue
 //!
@@ -166,6 +166,143 @@ const FRAME_PERIOD_100NS: u64 = 166_670;
 // ---------------------------------------------------------------------------
 // Public dialog types
 // ---------------------------------------------------------------------------
+
+/// Built-in visual theme used by [`WindowManager`].
+///
+/// [`Theme::Classic`] preserves the original Windows 9x/2000-style palette.
+/// [`Theme::Light`] and [`Theme::Dark`] use modern neutral surfaces, roomier
+/// geometry, flat controls, hover feedback, modern caption icons, and a compact
+/// pointer while preserving application state during runtime switches.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Theme {
+    /// Original raised-edge, teal-desktop appearance.
+    Classic,
+    /// Modern light appearance.
+    #[default]
+    Light,
+    /// Modern dark appearance.
+    Dark,
+}
+
+#[derive(Clone, Copy)]
+struct Palette {
+    desktop: Color,
+    face: Color,
+    highlight: Color,
+    shadow: Color,
+    dark_shadow: Color,
+    frame: Color,
+    active_l: Color,
+    active_r: Color,
+    inactive_l: Color,
+    inactive_r: Color,
+    active_text: Color,
+    inactive_text: Color,
+    accent: Color,
+    window: Color,
+    window_text: Color,
+    label_text: Color,
+    disabled_text: Color,
+}
+
+#[derive(Clone, Copy)]
+struct Metrics {
+    title_h: i32,
+    border: i32,
+    pad: i32,
+    capbtn_w: i32,
+    capbtn_h: i32,
+    capbtn_gap: i32,
+    textbox_h: u32,
+    checkbox_sz: u32,
+    combo_h: u32,
+    button_h: u32,
+    slider_h: u32,
+    nud_h: u32,
+}
+
+impl Theme {
+    const fn palette(self) -> Palette {
+        match self {
+            Self::Classic => Palette {
+                desktop: Color::rgb(0x00, 0x80, 0x80),
+                face: Color::rgb(0xD4, 0xD0, 0xC8),
+                highlight: Color::rgb(0xFF, 0xFF, 0xFF),
+                shadow: Color::rgb(0x80, 0x80, 0x80),
+                dark_shadow: Color::rgb(0x40, 0x40, 0x40),
+                frame: Color::rgb(0x00, 0x00, 0x00),
+                active_l: Color::rgb(0x00, 0x00, 0x80),
+                active_r: Color::rgb(0x10, 0x84, 0xD0),
+                inactive_l: Color::rgb(0x7B, 0x7B, 0x7B),
+                inactive_r: Color::rgb(0xB5, 0xB5, 0xB5),
+                active_text: Color::rgb(0xFF, 0xFF, 0xFF),
+                inactive_text: Color::rgb(0xD4, 0xD0, 0xC8),
+                accent: Color::rgb(0x00, 0x00, 0x80),
+                window: Color::rgb(0xFF, 0xFF, 0xFF),
+                window_text: Color::rgb(0x00, 0x00, 0x00),
+                label_text: Color::rgb(0x80, 0x80, 0x80),
+                disabled_text: Color::rgb(0x80, 0x80, 0x80),
+            },
+            Self::Light => Palette {
+                desktop: Color::rgb(0xE8, 0xED, 0xF5),
+                face: Color::rgb(0xF5, 0xF7, 0xFA),
+                highlight: Color::rgb(0xFF, 0xFF, 0xFF),
+                shadow: Color::rgb(0xA8, 0xB2, 0xC1),
+                dark_shadow: Color::rgb(0x69, 0x73, 0x86),
+                frame: Color::rgb(0xC1, 0xC9, 0xD4),
+                active_l: Color::rgb(0x25, 0x63, 0xEB),
+                active_r: Color::rgb(0x3B, 0x82, 0xF6),
+                inactive_l: Color::rgb(0x94, 0xA3, 0xB8),
+                inactive_r: Color::rgb(0xCB, 0xD5, 0xE1),
+                active_text: Color::rgb(0xFF, 0xFF, 0xFF),
+                inactive_text: Color::rgb(0x33, 0x41, 0x55),
+                accent: Color::rgb(0x25, 0x63, 0xEB),
+                window: Color::rgb(0xFF, 0xFF, 0xFF),
+                window_text: Color::rgb(0x17, 0x20, 0x33),
+                label_text: Color::rgb(0x17, 0x20, 0x33),
+                disabled_text: Color::rgb(0x7A, 0x86, 0x98),
+            },
+            Self::Dark => Palette {
+                desktop: Color::rgb(0x0B, 0x11, 0x20),
+                face: Color::rgb(0x1F, 0x29, 0x37),
+                highlight: Color::rgb(0x47, 0x55, 0x69),
+                shadow: Color::rgb(0x0F, 0x17, 0x2A),
+                dark_shadow: Color::rgb(0x02, 0x06, 0x17),
+                frame: Color::rgb(0x02, 0x06, 0x17),
+                active_l: Color::rgb(0x2B, 0x30, 0x38),
+                active_r: Color::rgb(0x2B, 0x30, 0x38),
+                inactive_l: Color::rgb(0x20, 0x24, 0x2B),
+                inactive_r: Color::rgb(0x20, 0x24, 0x2B),
+                active_text: Color::rgb(0xFF, 0xFF, 0xFF),
+                inactive_text: Color::rgb(0xCB, 0xD5, 0xE1),
+                accent: Color::rgb(0x3B, 0x82, 0xF6),
+                window: Color::rgb(0x11, 0x18, 0x27),
+                window_text: Color::rgb(0xF1, 0xF5, 0xF9),
+                label_text: Color::rgb(0xF1, 0xF5, 0xF9),
+                disabled_text: Color::rgb(0x94, 0xA3, 0xB8),
+            },
+        }
+    }
+
+    const fn metrics(self) -> Metrics {
+        match self {
+            Self::Classic => Metrics {
+                title_h: TITLE_H, border: BORDER, pad: PAD,
+                capbtn_w: CAPBTN_W, capbtn_h: CAPBTN_H, capbtn_gap: CAPBTN_GAP,
+                textbox_h: TEXTBOX_H, checkbox_sz: CB_SZ, combo_h: COMBO_H,
+                button_h: WBTN_H, slider_h: SLIDER_H, nud_h: NUD_H,
+            },
+            Self::Light | Self::Dark => Metrics {
+                title_h: 32, border: 1, pad: 12,
+                capbtn_w: 32, capbtn_h: 30, capbtn_gap: 0,
+                textbox_h: 26, checkbox_sz: 16, combo_h: 26,
+                button_h: 30, slider_h: 26, nud_h: 26,
+            },
+        }
+    }
+
+    const fn is_modern(self) -> bool { !matches!(self, Self::Classic) }
+}
 
 /// Button layout for [`WindowManager::message_box`].
 pub enum MsgBoxButtons {
@@ -665,40 +802,42 @@ struct Window {
 }
 
 impl Window {
-    fn title_rect(&self) -> (i32, i32, u32, u32) {
-        (self.x + BORDER, self.y + BORDER,
-         self.w - (BORDER * 2) as u32, TITLE_H as u32)
+    fn title_rect(&self, m: Metrics) -> (i32, i32, u32, u32) {
+        (self.x + m.border, self.y + m.border,
+         self.w - (m.border * 2) as u32, m.title_h as u32)
     }
-    fn btn_rect(&self, idx: i32) -> (i32, i32, u32, u32) {
-        let (tx, ty, tw, _) = self.title_rect();
-        let bx = tx + tw as i32 - 2 - (idx + 1) * (CAPBTN_W + CAPBTN_GAP) + CAPBTN_GAP;
-        let by = ty + (TITLE_H - CAPBTN_H) / 2;
-        (bx, by, CAPBTN_W as u32, CAPBTN_H as u32)
+    fn btn_rect(&self, idx: i32, m: Metrics) -> (i32, i32, u32, u32) {
+        let (tx, ty, tw, _) = self.title_rect(m);
+        let classic_inset = if m.capbtn_gap > 0 { 2 } else { 0 };
+        let bx = tx + tw as i32 - classic_inset
+            - (idx + 1) * (m.capbtn_w + m.capbtn_gap) + m.capbtn_gap;
+        let by = ty + (m.title_h - m.capbtn_h) / 2;
+        (bx, by, m.capbtn_w as u32, m.capbtn_h as u32)
     }
-    fn close_rect(&self)    -> (i32, i32, u32, u32) { self.btn_rect(0) }
-    fn maximize_rect(&self) -> (i32, i32, u32, u32) { self.btn_rect(1) }
-    fn minimize_rect(&self) -> (i32, i32, u32, u32) { self.btn_rect(2) }
+    fn close_rect(&self, m: Metrics)    -> (i32, i32, u32, u32) { self.btn_rect(0, m) }
+    fn maximize_rect(&self, m: Metrics) -> (i32, i32, u32, u32) { self.btn_rect(1, m) }
+    fn minimize_rect(&self, m: Metrics) -> (i32, i32, u32, u32) { self.btn_rect(2, m) }
 
     fn hit(px: i32, py: i32, r: (i32, i32, u32, u32)) -> bool {
         let (x, y, w, h) = r;
         px >= x && px < x + w as i32 && py >= y && py < y + h as i32
     }
-    fn hit_close(&self, px: i32, py: i32)    -> bool { Self::hit(px, py, self.close_rect()) }
-    fn hit_minimize(&self, px: i32, py: i32) -> bool { Self::hit(px, py, self.minimize_rect()) }
-    fn hit_title(&self, px: i32, py: i32) -> bool {
-        let (tx, ty, tw, th) = self.title_rect();
+    fn hit_close(&self, px: i32, py: i32, m: Metrics) -> bool { Self::hit(px, py, self.close_rect(m)) }
+    fn hit_minimize(&self, px: i32, py: i32, m: Metrics) -> bool { Self::hit(px, py, self.minimize_rect(m)) }
+    fn hit_title(&self, px: i32, py: i32, m: Metrics) -> bool {
+        let (tx, ty, tw, th) = self.title_rect(m);
         px >= tx && px < tx + tw as i32 && py >= ty && py < ty + th as i32
     }
-    fn hit_body(&self, px: i32, py: i32) -> bool {
-        let h = self.visible_height();
+    fn hit_body(&self, px: i32, py: i32, m: Metrics) -> bool {
+        let h = self.visible_height(m);
         px >= self.x && px < self.x + self.w as i32
             && py >= self.y && py < self.y + h as i32
     }
-    fn visible_height(&self) -> u32 {
-        if self.minimized { (BORDER * 2 + TITLE_H) as u32 } else { self.h }
+    fn visible_height(&self, m: Metrics) -> u32 {
+        if self.minimized { (m.border * 2 + m.title_h) as u32 } else { self.h }
     }
-    fn client_origin(&self) -> (i32, i32) {
-        (self.x + BORDER + PAD, self.y + BORDER + TITLE_H + 1 + PAD)
+    fn client_origin(&self, m: Metrics) -> (i32, i32) {
+        (self.x + m.border + m.pad, self.y + m.border + m.title_h + 1 + m.pad)
     }
 }
 
@@ -717,6 +856,7 @@ pub struct WindowManager {
     sw:               u32,
     sh:               u32,
     lbtn:             bool,
+    theme:            Theme,
 
     widgets:          Vec<Widget>,
     focused_widget:   Option<usize>,
@@ -772,7 +912,8 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
-    /// Constructs an empty window manager and parses the caller-supplied font.
+    /// Constructs a Light-themed empty window manager and parses the
+    /// caller-supplied font.
     ///
     /// The cursor starts at the center of the screen. `fontdue` copies the font
     /// data, so `font_bytes` need not have a static lifetime.
@@ -781,6 +922,14 @@ impl WindowManager {
     ///
     /// Panics if `font_bytes` is not a font accepted by `fontdue`.
     pub fn new(sw: u32, sh: u32, font_bytes: &[u8], font_px: f32) -> Self {
+        Self::new_with_theme(sw, sh, font_bytes, font_px, Theme::Light)
+    }
+
+    /// Constructs an empty window manager with the selected built-in theme.
+    ///
+    /// The theme can later be changed with [`Self::set_theme`].
+    pub fn new_with_theme(sw: u32, sh: u32, font_bytes: &[u8], font_px: f32,
+                          theme: Theme) -> Self {
         let font = fontdue::Font::from_bytes(
             font_bytes, fontdue::FontSettings::default(),
         ).unwrap();
@@ -789,12 +938,20 @@ impl WindowManager {
         Self {
             windows: Vec::new(), next_id: 0,
             cx: sw as i32 / 2, cy: sh as i32 / 2,
-            sw, sh, lbtn: false,
+            sw, sh, lbtn: false, theme,
             widgets: Vec::new(), focused_widget: None,
             armed_btn: None, slider_drag: None, scroll_drag: None, event_source: None,
             font, ascent, font_px,
         }
     }
+
+    /// Returns the currently selected visual theme.
+    pub const fn theme(&self) -> Theme { self.theme }
+
+    /// Selects the visual theme used by subsequent renders and message boxes.
+    ///
+    /// Window positions, focus, widget values, and callbacks are unchanged.
+    pub fn set_theme(&mut self, theme: Theme) { self.theme = theme; }
 
     // -----------------------------------------------------------------------
     // Font helpers
@@ -1596,7 +1753,7 @@ impl WindowManager {
             &background, ctx.fb, ctx.drv, ctx.gop_fb, ctx.gop_stride,
             &self.font, self.ascent, self.font_px,
             title, text, &buttons, self.sw, self.sh,
-            &mut self.cx, &mut self.cy,
+            &mut self.cx, &mut self.cy, self.theme.palette(), self.theme.is_modern(),
         )
     }
 
@@ -2111,7 +2268,7 @@ impl WindowManager {
             _ => return None,
         };
         let win = self.windows.iter().find(|w| w.id == win_id && w.vis && !w.minimized)?;
-        let (ox, _) = win.client_origin();
+        let (ox, _) = win.client_origin(self.theme.metrics());
         let lw = self.label_px(label);
         let track_x = ox + rel_x + lw;
         let track_w = width as i32 - SLIDER_THW;
@@ -2137,13 +2294,13 @@ impl WindowManager {
                 .find(|w| w.id == win_id)
                 .and_then(|win| {
                     if win.minimized || !win.vis { return None; }
-                    let (ox, oy) = win.client_origin();
+                    let (ox, oy) = win.client_origin(self.theme.metrics());
                     let bx = ox + rx + lw;
-                    let by = oy + ry + COMBO_H as i32;
+                    let by = oy + ry + self.theme.metrics().combo_h as i32;
                     (0..n as i32).find(|&item| {
-                        let iy = by + item * COMBO_H as i32;
+                        let iy = by + item * self.theme.metrics().combo_h as i32;
                         cx >= bx && cx < bx + width as i32
-                            && cy >= iy && cy < iy + COMBO_H as i32
+                            && cy >= iy && cy < iy + self.theme.metrics().combo_h as i32
                     }).map(|item| item as usize)
                 });
             if let Widget::ComboBox(c) = &mut self.widgets[i] {
@@ -2159,17 +2316,19 @@ impl WindowManager {
         for i in (0..self.windows.len()).rev() {
             let w = &self.windows[i];
             if !w.vis { continue; }
-            if w.hit_close(cx, cy)    { self.windows[i].vis = false; return None; }
-            if w.hit_minimize(cx, cy) {
+            if w.hit_close(cx, cy, self.theme.metrics()) { self.windows[i].vis = false; return None; }
+            if w.hit_minimize(cx, cy, self.theme.metrics()) {
                 self.windows[i].minimized = !self.windows[i].minimized; return None;
             }
-            if w.hit_body(cx, cy) { break; }
+            if w.hit_body(cx, cy, self.theme.metrics()) { break; }
         }
 
-        let hit_idx = self.windows.iter().rposition(|w| w.vis && w.hit_body(cx, cy))?;
+        let hit_idx = self.windows.iter().rposition(|w| w.vis && w.hit_body(cx, cy, self.theme.metrics()))?;
         let in_title = {
             let w = &self.windows[hit_idx];
-            w.hit_title(cx, cy) && !w.hit_close(cx, cy) && !w.hit_minimize(cx, cy)
+            w.hit_title(cx, cy, self.theme.metrics())
+                && !w.hit_close(cx, cy, self.theme.metrics())
+                && !w.hit_minimize(cx, cy, self.theme.metrics())
         };
         let win = self.windows.remove(hit_idx);
         let win_id = win.id;
@@ -2185,7 +2344,7 @@ impl WindowManager {
             let win = self.windows.last().unwrap();
             if win.minimized { None }
             else {
-                let (ox, oy) = win.client_origin();
+                let (ox, oy) = win.client_origin(self.theme.metrics());
                 self.widget_hit(cx, cy, win_id, ox, oy)
             }
         };
@@ -2194,7 +2353,7 @@ impl WindowManager {
             Some((i, WidgetHit::Focus)) => { self.focused_widget = Some(i); None }
             Some((i, WidgetHit::TextCursor(click_x, click_y))) => {
                 self.focused_widget = Some(i);
-                let (ox, oy) = self.windows.last().unwrap().client_origin();
+                let (ox, oy) = self.windows.last().unwrap().client_origin(self.theme.metrics());
                 let is_tb = matches!(&self.widgets[i], Widget::TextBox(_));
                 let is_ta = matches!(&self.widgets[i], Widget::TextArea(_));
                 if is_tb {
@@ -2327,7 +2486,7 @@ impl WindowManager {
                     let bx = ox + rx + self.label_px(tb.label);
                     let by = oy + ry;
                     if cx >= bx && cx < bx + tb.width as i32
-                        && cy >= by && cy < by + TEXTBOX_H as i32 {
+                        && cy >= by && cy < by + self.theme.metrics().textbox_h as i32 {
                         return Some((i, WidgetHit::TextCursor(cx, cy)));
                     }
                 }
@@ -2357,7 +2516,7 @@ impl WindowManager {
                 }
                 Widget::CheckBox(_) => {
                     let bx = ox + rx; let by = oy + ry;
-                    if cx >= bx && cy >= by && cy < by + CB_SZ as i32 {
+                    if cx >= bx && cy >= by && cy < by + self.theme.metrics().checkbox_sz as i32 {
                         return Some((i, WidgetHit::Toggle));
                     }
                 }
@@ -2372,7 +2531,7 @@ impl WindowManager {
                     let bx = ox + rx + self.label_px(cb.label);
                     let by = oy + ry;
                     if cx >= bx && cx < bx + cb.width as i32
-                        && cy >= by && cy < by + COMBO_H as i32 {
+                        && cy >= by && cy < by + self.theme.metrics().combo_h as i32 {
                         return Some((i, WidgetHit::ComboToggle));
                     }
                 }
@@ -2407,7 +2566,7 @@ impl WindowManager {
                 Widget::Button(btn) => {
                     let bx = ox + rx; let by = oy + ry;
                     if cx >= bx && cx < bx + btn.width as i32
-                        && cy >= by && cy < by + WBTN_H as i32 {
+                        && cy >= by && cy < by + self.theme.metrics().button_h as i32 {
                         return Some((i, WidgetHit::Press));
                     }
                 }
@@ -2415,7 +2574,7 @@ impl WindowManager {
                     let lw = self.label_px(s.label);
                     let bx = ox + rx + lw; let by = oy + ry;
                     if cx >= bx && cx < bx + s.width as i32
-                        && cy >= by && cy < by + SLIDER_H as i32 {
+                        && cy >= by && cy < by + self.theme.metrics().slider_h as i32 {
                         return Some((i, WidgetHit::SliderPress));
                     }
                 }
@@ -2425,15 +2584,15 @@ impl WindowManager {
                     let btn_x = val_x + n.width as i32;
                     let by    = oy + ry;
                     if cx >= btn_x && cx < btn_x + NUD_BTN_W
-                        && cy >= by && cy < by + NUD_H as i32 {
-                        if cy < by + NUD_H as i32 / 2 {
+                        && cy >= by && cy < by + self.theme.metrics().nud_h as i32 {
+                        if cy < by + self.theme.metrics().nud_h as i32 / 2 {
                             return Some((i, WidgetHit::NudUp));
                         } else {
                             return Some((i, WidgetHit::NudDown));
                         }
                     }
                     // Click on the value box focuses it
-                    if cx >= val_x && cx < btn_x && cy >= by && cy < by + NUD_H as i32 {
+                    if cx >= val_x && cx < btn_x && cy >= by && cy < by + self.theme.metrics().nud_h as i32 {
                         return Some((i, WidgetHit::Focus));
                     }
                 }
@@ -2447,11 +2606,33 @@ impl WindowManager {
         let Widget::Button(btn) = &self.widgets[idx] else { return false };
         let Some(win) = self.windows.iter()
             .find(|w| w.id == btn.win_id && w.vis && !w.minimized) else { return false };
-        let (ox, oy) = win.client_origin();
+        let (ox, oy) = win.client_origin(self.theme.metrics());
         self.cx >= ox + btn.rel_x
             && self.cx < ox + btn.rel_x + btn.width as i32
             && self.cy >= oy + btn.rel_y
-            && self.cy < oy + btn.rel_y + WBTN_H as i32
+            && self.cy < oy + btn.rel_y + self.theme.metrics().button_h as i32
+    }
+
+    fn border_raised(&self, fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32) {
+        let p = self.theme.palette();
+        if self.theme.is_modern() {
+            fb.rect_outline(x, y, w, h, fb.pack(p.frame));
+        } else {
+            fb.border_raised_with(x, y, w, h, p.frame, p.highlight, p.shadow, p.dark_shadow);
+        }
+    }
+
+    fn border_sunken(&self, fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32) {
+        let p = self.theme.palette();
+        if self.theme.is_modern() {
+            fb.rect_outline(x, y, w, h, fb.pack(p.shadow));
+        } else {
+            fb.border_sunken_with(x, y, w, h, p.highlight, p.shadow, p.dark_shadow);
+        }
+    }
+
+    fn cursor_in(&self, x: i32, y: i32, w: u32, h: u32) -> bool {
+        Window::hit(self.cx, self.cy, (x, y, w, h))
     }
 
     // -----------------------------------------------------------------------
@@ -2464,11 +2645,15 @@ impl WindowManager {
     /// [`Framebuffer::present_to`].
     pub fn render(&self, fb: &mut Framebuffer) {
         self.render_base(fb);
-        draw_cursor(fb, self.cx, self.cy);
+        if self.theme.is_modern() {
+            draw_cursor_modern(fb, self.cx, self.cy);
+        } else {
+            draw_cursor(fb, self.cx, self.cy);
+        }
     }
 
     fn render_base(&self, fb: &mut Framebuffer) {
-        fb.fill(0, 0, fb.width(), fb.height(), fb.pack(Color::DESKTOP));
+        fb.fill(0, 0, fb.width(), fb.height(), fb.pack(self.theme.palette().desktop));
 
         let wn = self.windows.len();
         for (i, win) in self.windows.iter().enumerate() {
@@ -2503,14 +2688,18 @@ impl WindowManager {
     // -----------------------------------------------------------------------
 
     fn draw_window(&self, fb: &mut Framebuffer, w: &Window, focused: bool) {
-        let vis_h = w.visible_height();
-        let face = fb.pack(Color::FACE);
+        if self.theme.is_modern() {
+            self.draw_window_modern(fb, w, focused);
+            return;
+        }
+        let vis_h = w.visible_height(self.theme.metrics());
+        let face = fb.pack(self.theme.palette().face);
         fb.fill(w.x, w.y, w.w, vis_h, face);
 
-        let fr = fb.pack(Color::FRAME);
-        let hi = fb.pack(Color::HIGHLIGHT);
-        let sh = fb.pack(Color::SHADOW);
-        let dk = fb.pack(Color::DARK_SHADOW);
+        let fr = fb.pack(self.theme.palette().frame);
+        let hi = fb.pack(self.theme.palette().highlight);
+        let sh = fb.pack(self.theme.palette().shadow);
+        let dk = fb.pack(self.theme.palette().dark_shadow);
         fb.fill(w.x,                  w.y,                    w.w, 1,     fr);
         fb.fill(w.x,                  w.y,                    1,   vis_h, fr);
         fb.fill(w.x + w.w as i32 - 1, w.y,                    1,   vis_h, dk);
@@ -2524,39 +2713,99 @@ impl WindowManager {
         fb.fill(w.x + w.w as i32 - 3, w.y + 2,                1, vis_h - 4,     sh);
         fb.fill(w.x + 2,              w.y + vis_h as i32 - 3, w.w - 4, 1,       sh);
 
-        let (tx, ty, tw, th) = w.title_rect();
+        let (tx, ty, tw, th) = w.title_rect(self.theme.metrics());
         let (tl, tr, tc) = if focused {
-            (Color::ACT_L, Color::ACT_R, Color::ACT_TEXT)
+            (self.theme.palette().active_l, self.theme.palette().active_r, self.theme.palette().active_text)
         } else {
-            (Color::INACT_L, Color::INACT_R, Color::INACT_TEXT)
+            (self.theme.palette().inactive_l, self.theme.palette().inactive_r, self.theme.palette().inactive_text)
         };
         fb.gradient_h(tx, ty, tw, th, tl, tr);
 
-        let (cx, cy, cw, ch) = w.close_rect();
+        let (cx, cy, cw, ch) = w.close_rect(self.theme.metrics());
         self.draw_capbtn_x(fb, cx, cy, cw, ch);
-        let (mx, my, mw, mh) = w.maximize_rect();
+        let (mx, my, mw, mh) = w.maximize_rect(self.theme.metrics());
         self.draw_capbtn_sym(fb, mx, my, mw, mh, false);
-        let (nx, ny, nw, nh) = w.minimize_rect();
+        let (nx, ny, nw, nh) = w.minimize_rect(self.theme.metrics());
         self.draw_capbtn_sym(fb, nx, ny, nw, nh, true);
 
         let text_area_w = (nx - tx - 4).max(0) as u32;
         let title_w = self.text_w(&w.title);
         let text_off = if title_w < text_area_w as i32 { (text_area_w as i32 - title_w) / 2 } else { 0 };
-        let baseline = ty + (TITLE_H + self.ascent) / 2;
+        let baseline = ty + (self.theme.metrics().title_h + self.ascent) / 2;
         fb.text_aa(tx + 4 + text_off, baseline, &w.title, tc, &self.font, self.font_px);
 
         if !w.minimized {
-            fb.fill(tx, ty + TITLE_H, tw, 1, sh);
-            let cy2 = ty + TITLE_H + 1;
-            let ch2 = (w.y + w.h as i32 - BORDER - cy2).max(0) as u32;
+            fb.fill(tx, ty + self.theme.metrics().title_h, tw, 1, sh);
+            let cy2 = ty + self.theme.metrics().title_h + 1;
+            let ch2 = (w.y + w.h as i32 - self.theme.metrics().border - cy2).max(0) as u32;
             fb.fill(tx, cy2, tw, ch2, face);
         }
     }
 
+    fn draw_window_modern(&self, fb: &mut Framebuffer, w: &Window, focused: bool) {
+        let p = self.theme.palette();
+        let m = self.theme.metrics();
+        let vis_h = w.visible_height(m);
+
+        fb.fill(w.x + 4, w.y + 4, w.w, vis_h, fb.pack(p.dark_shadow));
+        fb.fill(w.x, w.y, w.w, vis_h, fb.pack(p.face));
+        fb.rect_outline(w.x, w.y, w.w, vis_h, fb.pack(p.frame));
+
+        let (tx, ty, tw, th) = w.title_rect(m);
+        let title_bg = if focused { p.active_l } else { p.inactive_l };
+        let title_text = if focused { p.active_text } else { p.inactive_text };
+        fb.fill(tx, ty, tw, th, fb.pack(title_bg));
+
+        let (cx, cy, cw, ch) = w.close_rect(m);
+        let (mx, my, mw, mh) = w.maximize_rect(m);
+        let (nx, ny, nw, nh) = w.minimize_rect(m);
+        self.draw_modern_capbtn(fb, cx, cy, cw, ch, 0, title_bg);
+        self.draw_modern_capbtn(fb, mx, my, mw, mh, 1, title_bg);
+        self.draw_modern_capbtn(fb, nx, ny, nw, nh, 2, title_bg);
+
+        let baseline = ty + (m.title_h + self.ascent) / 2;
+        let max_title = (nx - tx - 20).max(0);
+        fb.text_aa(tx + 12, baseline, self.fit(&w.title, max_title),
+                   title_text, &self.font, self.font_px);
+
+        if !w.minimized {
+            let client_y = ty + m.title_h;
+            let client_h = (w.y + w.h as i32 - m.border - client_y).max(0) as u32;
+            fb.fill(tx, client_y, tw, client_h, fb.pack(p.face));
+        }
+    }
+
+    fn draw_modern_capbtn(&self, fb: &mut Framebuffer, x: i32, y: i32,
+                          w: u32, h: u32, symbol: u8, base: Color) {
+        let p = self.theme.palette();
+        let hovered = self.cursor_in(x, y, w, h);
+        let bg = if hovered && symbol == 0 {
+            Color::rgb(0xE8, 0x11, 0x23)
+        } else if hovered {
+            p.highlight
+        } else {
+            base
+        };
+        fb.fill(x, y, w, h, fb.pack(bg));
+        let ink = fb.pack(if hovered && symbol != 0 { p.window_text } else { p.active_text });
+        let cx = x + w as i32 / 2;
+        let cy = y + h as i32 / 2;
+        match symbol {
+            0 => {
+                for i in -4..=4 {
+                    fb.set_i(cx + i, cy + i, ink);
+                    fb.set_i(cx + i, cy - i, ink);
+                }
+            }
+            1 => fb.rect_outline(cx - 5, cy - 4, 10, 8, ink),
+            _ => fb.fill(cx - 5, cy + 3, 10, 1, ink),
+        }
+    }
+
     fn draw_capbtn_x(&self, fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32) {
-        fb.fill(x, y, w, h, fb.pack(Color::FACE));
-        fb.border_raised(x, y, w, h);
-        let k = fb.pack(Color::BLACK);
+        fb.fill(x, y, w, h, fb.pack(self.theme.palette().face));
+        self.border_raised(fb, x, y, w, h);
+        let k = fb.pack(self.theme.palette().window_text);
         for i in 0i32..4 {
             fb.set_i(x + 4 + i,     y + 3 + i, k);
             fb.set_i(x + 4 + i + 1, y + 3 + i, k);
@@ -2567,9 +2816,9 @@ impl WindowManager {
 
     fn draw_capbtn_sym(&self, fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32,
                        minimize: bool) {
-        fb.fill(x, y, w, h, fb.pack(Color::FACE));
-        fb.border_raised(x, y, w, h);
-        let k = fb.pack(Color::BLACK);
+        fb.fill(x, y, w, h, fb.pack(self.theme.palette().face));
+        self.border_raised(fb, x, y, w, h);
+        let k = fb.pack(self.theme.palette().window_text);
         if minimize {
             fb.fill(x + 4, y + h as i32 - 5, 7, 2, k);
         } else {
@@ -2587,7 +2836,7 @@ impl WindowManager {
     fn draw_widget(&self, fb: &mut Framebuffer, widget: &Widget,
                    win: &Window, focused: bool) {
         if !widget.is_visible() { return; }
-        let (ox, oy) = win.client_origin();
+        let (ox, oy) = win.client_origin(self.theme.metrics());
         let enabled = widget.is_enabled();
         match widget {
             Widget::Label(w)         => self.draw_label(fb, w, ox, oy),
@@ -2618,7 +2867,7 @@ impl WindowManager {
         } else {
             &lbl.text
         };
-        fb.text_aa(ax, ay, text, Color::WINDOW_TEXT, &self.font, self.font_px);
+        fb.text_aa(ax, ay, text, self.theme.palette().window_text, &self.font, self.font_px);
     }
 
     fn draw_textbox(&self, fb: &mut Framebuffer, tb: &TextBox,
@@ -2626,14 +2875,21 @@ impl WindowManager {
         let ax = ox + tb.rel_x;
         let ay = oy + tb.rel_y;
         let lw = self.label_px(tb.label);
-        let baseline = ay + self.ascent + (TEXTBOX_H as i32 - self.ascent) / 2;
-        let lc = if enabled { Color::SHADOW } else { Color::SHADOW };
+        let baseline = ay + self.ascent + (self.theme.metrics().textbox_h as i32 - self.ascent) / 2;
+        let lc = if enabled { self.theme.palette().label_text } else { self.theme.palette().disabled_text };
         fb.text_aa(ax, baseline, tb.label, lc, &self.font, self.font_px);
 
         let bx = ax + lw;
-        let bg = if enabled { Color::WINDOW } else { Color::FACE };
-        fb.fill(bx, ay, tb.width, TEXTBOX_H, fb.pack(bg));
-        fb.border_sunken(bx, ay, tb.width, TEXTBOX_H);
+        let bg = if enabled { self.theme.palette().window } else { self.theme.palette().face };
+        fb.fill(bx, ay, tb.width, self.theme.metrics().textbox_h, fb.pack(bg));
+        self.border_sunken(fb, bx, ay, tb.width, self.theme.metrics().textbox_h);
+        if self.theme.is_modern()
+            && enabled
+            && (focused || self.cursor_in(bx, ay, tb.width, self.theme.metrics().textbox_h))
+        {
+            fb.rect_outline(bx, ay, tb.width, self.theme.metrics().textbox_h,
+                    fb.pack(self.theme.palette().accent));
+        }
 
         let inner_x = bx + 4;
         let max_px  = tb.width as i32 - 8;
@@ -2642,14 +2898,14 @@ impl WindowManager {
         let left_part  = self.fit_right(&tb.text[..cursor], max_px);
         let view_start = cursor - left_part.len();
         let visible    = self.fit(&tb.text[view_start..], max_px);
-        let tc = if enabled { Color::WINDOW_TEXT } else { Color::SHADOW };
+        let tc = if enabled { self.theme.palette().window_text } else { self.theme.palette().disabled_text };
         fb.text_aa(inner_x, baseline, visible, tc, &self.font, self.font_px);
 
         if focused && enabled && !tb.read_only {
             let cur_x = inner_x + self.text_w(left_part);
             let h = self.ascent + 3;
-            fb.fill(cur_x, ay + (TEXTBOX_H as i32 - h) / 2, 1, h as u32,
-                    fb.pack(Color::WINDOW_TEXT));
+            fb.fill(cur_x, ay + (self.theme.metrics().textbox_h as i32 - h) / 2, 1, h as u32,
+                    fb.pack(self.theme.palette().window_text));
         }
     }
 
@@ -2657,14 +2913,20 @@ impl WindowManager {
                      ox: i32, oy: i32, focused: bool, enabled: bool) {
         let ax = ox + ta.rel_x;
         let ay = oy + ta.rel_y;
-        let bg = if enabled { Color::WINDOW } else { Color::FACE };
+        let bg = if enabled { self.theme.palette().window } else { self.theme.palette().face };
         fb.fill(ax, ay, ta.width, ta.height, fb.pack(bg));
-        fb.border_sunken(ax, ay, ta.width, ta.height);
+        self.border_sunken(fb, ax, ay, ta.width, ta.height);
+        if self.theme.is_modern()
+            && enabled
+            && (focused || self.cursor_in(ax, ay, ta.width, ta.height))
+        {
+            fb.rect_outline(ax, ay, ta.width, ta.height, fb.pack(self.theme.palette().accent));
+        }
 
         let lh   = self.line_h();
         let n_vis = ((ta.height as i32 - 4) / lh).max(0) as usize;
         let max_px = ta.width as i32 - 8;
-        let tc = if enabled { Color::WINDOW_TEXT } else { Color::SHADOW };
+        let tc = if enabled { self.theme.palette().window_text } else { self.theme.palette().disabled_text };
 
         let mut line_idx = 0usize;
         let mut byte_pos = 0usize;
@@ -2687,7 +2949,7 @@ impl WindowManager {
                         let col_px = self.text_w(col_text).min(max_px);
                         let cur_x = ax + 4 + col_px;
                         fb.fill(cur_x, ay + 2 + display_row * lh,
-                                1, lh as u32, fb.pack(Color::WINDOW_TEXT));
+                                1, lh as u32, fb.pack(self.theme.palette().window_text));
                     }
                 }
                 display_row += 1;
@@ -2700,13 +2962,13 @@ impl WindowManager {
         let n_lines = text.split('\n').count();
         if n_lines > n_vis {
             let sb_x = ax + ta.width as i32 - 8;
-            fb.fill(sb_x, ay, 8, ta.height, fb.pack(Color::FACE));
-            fb.fill(sb_x, ay, 1, ta.height, fb.pack(Color::SHADOW));
+            fb.fill(sb_x, ay, 8, ta.height, fb.pack(self.theme.palette().face));
+            fb.fill(sb_x, ay, 1, ta.height, fb.pack(self.theme.palette().shadow));
             let th = ((n_vis * ta.height as usize) / n_lines).max(8) as u32;
             let ty2 = if n_lines > n_vis {
                 ta.scroll_y * (ta.height as usize - th as usize) / (n_lines - n_vis)
             } else { 0 };
-            fb.fill(sb_x + 1, ay + ty2 as i32, 7, th, fb.pack(Color::SHADOW));
+            fb.fill(sb_x + 1, ay + ty2 as i32, 7, th, fb.pack(self.theme.palette().shadow));
         }
     }
 
@@ -2714,21 +2976,44 @@ impl WindowManager {
                      ox: i32, oy: i32, enabled: bool) {
         let ax = ox + cb.rel_x;
         let ay = oy + cb.rel_y;
-        let baseline = ay + self.ascent + (CB_SZ as i32 - self.ascent) / 2;
-        fb.fill(ax, ay, CB_SZ, CB_SZ, fb.pack(Color::WINDOW));
-        fb.border_sunken(ax, ay, CB_SZ, CB_SZ);
+        let baseline = ay + self.ascent + (self.theme.metrics().checkbox_sz as i32 - self.ascent) / 2;
+        if self.theme.is_modern() && enabled
+            && self.cursor_in(ax - 3, ay - 3,
+                              (self.theme.metrics().checkbox_sz as i32 + self.text_w(cb.label) + 11) as u32,
+                              self.theme.metrics().checkbox_sz + 6)
+        {
+            fb.fill(ax - 3, ay - 3,
+                    (self.theme.metrics().checkbox_sz as i32 + self.text_w(cb.label) + 11) as u32,
+                    self.theme.metrics().checkbox_sz + 6, fb.pack(self.theme.palette().highlight));
+        }
+        fb.fill(ax, ay, self.theme.metrics().checkbox_sz, self.theme.metrics().checkbox_sz, fb.pack(self.theme.palette().window));
+        self.border_sunken(fb, ax, ay, self.theme.metrics().checkbox_sz, self.theme.metrics().checkbox_sz);
 
         if cb.checked {
-            let k = fb.pack(if enabled { Color::BLACK } else { Color::SHADOW });
-            for i in 0i32..4 {
-                fb.set_i(ax + 2 + i,     ay + 5 + i, k);
-                fb.set_i(ax + 5 + i,     ay + 8 - i, k);
-                fb.set_i(ax + 5 + i + 1, ay + 8 - i, k);
+            if self.theme.is_modern() {
+                let fill = if enabled { self.theme.palette().accent }
+                           else { self.theme.palette().disabled_text };
+                fb.fill(ax, ay, self.theme.metrics().checkbox_sz,
+                        self.theme.metrics().checkbox_sz, fb.pack(fill));
+                let k = fb.pack(self.theme.palette().active_text);
+                for i in 0i32..4 {
+                    fb.set_i(ax + 3 + i, ay + 7 + i, k);
+                    fb.set_i(ax + 6 + i, ay + 10 - i, k);
+                    fb.set_i(ax + 7 + i, ay + 10 - i, k);
+                }
+            } else {
+                let k = fb.pack(if enabled { self.theme.palette().window_text }
+                                else { self.theme.palette().disabled_text });
+                for i in 0i32..4 {
+                    fb.set_i(ax + 2 + i,     ay + 5 + i, k);
+                    fb.set_i(ax + 5 + i,     ay + 8 - i, k);
+                    fb.set_i(ax + 5 + i + 1, ay + 8 - i, k);
+                }
             }
         }
 
-        let tc = if enabled { Color::BLACK } else { Color::SHADOW };
-        fb.text_aa(ax + CB_SZ as i32 + 5, baseline, cb.label, tc, &self.font, self.font_px);
+        let tc = if enabled { self.theme.palette().window_text } else { self.theme.palette().disabled_text };
+        fb.text_aa(ax + self.theme.metrics().checkbox_sz as i32 + 5, baseline, cb.label, tc, &self.font, self.font_px);
     }
 
     fn draw_radiobutton(&self, fb: &mut Framebuffer, rb: &RadioButton,
@@ -2737,9 +3022,20 @@ impl WindowManager {
         let ay = oy + rb.rel_y;
         let cx = ax + RADIO_R + 1;
         let cy = ay + RADIO_R + 1;
-        let outline = fb.pack(if enabled { Color::SHADOW } else { Color::FACE });
-        let fill_c  = fb.pack(if enabled { Color::BLACK } else { Color::SHADOW });
-        let bg      = fb.pack(Color::WINDOW);
+        if self.theme.is_modern() && enabled
+            && self.cursor_in(ax - 3, ay - 3, (RADIO_R * 2 + self.text_w(rb.label) + 14) as u32,
+                              (RADIO_R * 2 + 8) as u32)
+        {
+            fb.fill(ax - 3, ay - 3, (RADIO_R * 2 + self.text_w(rb.label) + 14) as u32,
+                    (RADIO_R * 2 + 8) as u32, fb.pack(self.theme.palette().highlight));
+        }
+        let outline = fb.pack(if enabled { self.theme.palette().shadow }
+            else if self.theme.is_modern() { self.theme.palette().disabled_text }
+            else { self.theme.palette().face });
+        let fill_c  = fb.pack(if enabled && self.theme.is_modern() { self.theme.palette().accent }
+                              else if enabled { self.theme.palette().window_text }
+                              else { self.theme.palette().disabled_text });
+        let bg      = fb.pack(self.theme.palette().window);
 
         // Draw circle via per-pixel test
         for dy in -RADIO_R..=RADIO_R {
@@ -2756,7 +3052,7 @@ impl WindowManager {
         }
 
         let baseline = ay + self.ascent + (RADIO_R * 2 + 2 - self.ascent) / 2;
-        let tc = if enabled { Color::BLACK } else { Color::SHADOW };
+        let tc = if enabled { self.theme.palette().window_text } else { self.theme.palette().disabled_text };
         fb.text_aa(ax + RADIO_R * 2 + 6, baseline, rb.label, tc, &self.font, self.font_px);
     }
 
@@ -2765,52 +3061,71 @@ impl WindowManager {
         let ax = ox + cb.rel_x;
         let ay = oy + cb.rel_y;
         let lw = self.label_px(cb.label);
-        let baseline = ay + self.ascent + (COMBO_H as i32 - self.ascent) / 2;
-        fb.text_aa(ax, baseline, cb.label, Color::SHADOW, &self.font, self.font_px);
+        let baseline = ay + self.ascent + (self.theme.metrics().combo_h as i32 - self.ascent) / 2;
+        fb.text_aa(ax, baseline, cb.label, self.theme.palette().label_text, &self.font, self.font_px);
 
         let bx = ax + lw;
-        let bg = if enabled { Color::WINDOW } else { Color::FACE };
-        fb.fill(bx, ay, cb.width, COMBO_H, fb.pack(bg));
-        fb.border_sunken(bx, ay, cb.width, COMBO_H);
+        let bg = if enabled { self.theme.palette().window } else { self.theme.palette().face };
+        fb.fill(bx, ay, cb.width, self.theme.metrics().combo_h, fb.pack(bg));
+        self.border_sunken(fb, bx, ay, cb.width, self.theme.metrics().combo_h);
+        if self.theme.is_modern() && enabled
+            && self.cursor_in(bx, ay, cb.width, self.theme.metrics().combo_h)
+        {
+            fb.rect_outline(bx, ay, cb.width, self.theme.metrics().combo_h,
+                    fb.pack(self.theme.palette().accent));
+        }
 
         let text_max = (cb.width as i32 - COMBO_ARW as i32 - 6).max(0);
         let sel = cb.options.get(cb.selected).copied().unwrap_or("");
-        let tc = if enabled { Color::WINDOW_TEXT } else { Color::SHADOW };
+        let tc = if enabled { self.theme.palette().window_text } else { self.theme.palette().disabled_text };
         fb.text_aa(bx + 4, baseline, self.fit(sel, text_max), tc, &self.font, self.font_px);
 
         let arx = bx + cb.width as i32 - COMBO_ARW as i32;
-        fb.fill(arx, ay, COMBO_ARW, COMBO_H, fb.pack(Color::FACE));
-        fb.border_raised(arx, ay, COMBO_ARW, COMBO_H);
-        let k2 = fb.pack(Color::BLACK);
+        let arrow_bg = if self.theme.is_modern() && self.cursor_in(arx, ay, COMBO_ARW, self.theme.metrics().combo_h) {
+            self.theme.palette().highlight
+        } else {
+            self.theme.palette().face
+        };
+        fb.fill(arx, ay, COMBO_ARW, self.theme.metrics().combo_h, fb.pack(arrow_bg));
+        self.border_raised(fb, arx, ay, COMBO_ARW, self.theme.metrics().combo_h);
+        let k2 = fb.pack(self.theme.palette().window_text);
         let tri_cx = arx + COMBO_ARW as i32 / 2;
-        let tri_cy = ay + COMBO_H as i32 / 2 - 1;
-        for row in 0i32..4 {
-            // ▼ when closed, ▲ when open
-            let y = if cb.open { tri_cy + (3 - row) } else { tri_cy + row };
-            for col in -row..=row { fb.set_i(tri_cx + col, y, k2); }
+        let tri_cy = ay + self.theme.metrics().combo_h as i32 / 2 - 1;
+        if self.theme.is_modern() {
+            for i in 0i32..4 {
+                let dy = if cb.open { 2 - i } else { i - 2 };
+                fb.set_i(tri_cx - 4 + i, tri_cy + dy, k2);
+                fb.set_i(tri_cx + 4 - i, tri_cy + dy, k2);
+            }
+        } else {
+            for row in 0i32..4 {
+                // ▼ when closed, ▲ when open
+                let y = if cb.open { tri_cy + (3 - row) } else { tri_cy + row };
+                for col in -row..=row { fb.set_i(tri_cx + col, y, k2); }
+            }
         }
     }
 
     fn draw_combo_dropdown(&self, fb: &mut Framebuffer, cb: &ComboBox,
                            win: &Window, _focused: bool) {
-        let (ox, oy) = win.client_origin();
+        let (ox, oy) = win.client_origin(self.theme.metrics());
         let bx = ox + cb.rel_x + self.label_px(cb.label);
-        let by = oy + cb.rel_y + COMBO_H as i32;
+        let by = oy + cb.rel_y + self.theme.metrics().combo_h as i32;
         let n  = cb.options.len() as u32;
-        let dh = n * COMBO_H;
-        let wbg = fb.pack(Color::WINDOW);
-        let sbg = fb.pack(Color::ACT_L);
+        let dh = n * self.theme.metrics().combo_h;
+        let wbg = fb.pack(self.theme.palette().window);
+        let sbg = fb.pack(self.theme.palette().accent);
         fb.fill(bx, by, cb.width, dh, wbg);
-        fb.border_raised(bx, by, cb.width, dh);
+        self.border_raised(fb, bx, by, cb.width, dh);
 
         let text_max = (cb.width as i32 - 8).max(0);
         for (i, &opt) in cb.options.iter().enumerate() {
-            let iy = by + i as i32 * COMBO_H as i32;
+            let iy = by + i as i32 * self.theme.metrics().combo_h as i32;
             let sel = i == cb.selected;
-            fb.fill(bx + 1, iy, cb.width - 2, COMBO_H, if sel { sbg } else { wbg });
-            let baseline = iy + self.ascent + (COMBO_H as i32 - self.ascent) / 2;
+            fb.fill(bx + 1, iy, cb.width - 2, self.theme.metrics().combo_h, if sel { sbg } else { wbg });
+            let baseline = iy + self.ascent + (self.theme.metrics().combo_h as i32 - self.ascent) / 2;
             fb.text_aa(bx + 4, baseline, self.fit(opt, text_max),
-                       if sel { Color::ACT_TEXT } else { Color::WINDOW_TEXT },
+                       if sel { self.theme.palette().active_text } else { self.theme.palette().window_text },
                        &self.font, self.font_px);
         }
     }
@@ -2820,9 +3135,9 @@ impl WindowManager {
         let ax = ox + lb.rel_x;
         let ay = oy + lb.rel_y;
         let content_w = lb.width.saturating_sub(12);
-        let bg = if enabled { Color::WINDOW } else { Color::FACE };
+        let bg = if enabled { self.theme.palette().window } else { self.theme.palette().face };
         fb.fill(ax, ay, lb.width, lb.height, fb.pack(bg));
-        fb.border_sunken(ax, ay, lb.width, lb.height);
+        self.border_sunken(fb, ax, ay, lb.width, lb.height);
 
         let n_vis = (lb.height / LIST_ITEM) as usize;
         let lh    = LIST_ITEM as i32;
@@ -2834,11 +3149,15 @@ impl WindowManager {
             let item = lb.items[item_idx];
             let iy = ay + row as i32 * lh;
             let selected = lb.selected == Some(item_idx);
-            let bg2 = if selected && enabled { fb.pack(Color::ACT_L) } else { fb.pack(bg) };
+            let hovered = self.theme.is_modern() && enabled
+                && self.cursor_in(ax + 2, iy, content_w - 2, LIST_ITEM);
+            let bg2 = if selected && enabled { fb.pack(self.theme.palette().accent) }
+                      else if hovered { fb.pack(self.theme.palette().highlight) }
+                      else { fb.pack(bg) };
             fb.fill(ax + 2, iy, content_w - 2, LIST_ITEM, bg2);
             let baseline = iy + self.ascent + (lh - self.ascent) / 2;
-            let tc = if selected && enabled { Color::ACT_TEXT }
-                     else if enabled { Color::WINDOW_TEXT } else { Color::SHADOW };
+            let tc = if selected && enabled { self.theme.palette().active_text }
+                     else if enabled { self.theme.palette().window_text } else { self.theme.palette().disabled_text };
             fb.text_aa(ax + 6, baseline, self.fit(item, max_px), tc, &self.font, self.font_px);
         }
 
@@ -2846,11 +3165,11 @@ impl WindowManager {
         let n = lb.items.len();
         if n > n_vis {
             let sb_x = ax + content_w as i32;
-            fb.fill(sb_x, ay, 12, lb.height, fb.pack(Color::FACE));
-            fb.fill(sb_x, ay, 1, lb.height, fb.pack(Color::SHADOW));
+            fb.fill(sb_x, ay, 12, lb.height, fb.pack(self.theme.palette().face));
+            fb.fill(sb_x, ay, 1, lb.height, fb.pack(self.theme.palette().shadow));
             let th = ((n_vis * lb.height as usize) / n).max(8) as u32;
             let ty2 = (lb.scroll * (lb.height as usize - th as usize)) / (n - n_vis).max(1);
-            fb.fill(sb_x + 2, ay + ty2 as i32, 8, th, fb.pack(Color::SHADOW));
+            fb.fill(sb_x + 2, ay + ty2 as i32, 8, th, fb.pack(self.theme.palette().shadow));
         }
     }
 
@@ -2858,15 +3177,23 @@ impl WindowManager {
                    ox: i32, oy: i32, enabled: bool) {
         let ax = ox + btn.rel_x;
         let ay = oy + btn.rel_y;
-        fb.fill(ax, ay, btn.width, WBTN_H, fb.pack(Color::FACE));
-        if btn.pressed && enabled { fb.border_sunken(ax, ay, btn.width, WBTN_H); }
-        else                      { fb.border_raised(ax, ay, btn.width, WBTN_H); }
+        let hovered = enabled && self.cursor_in(ax, ay, btn.width, self.theme.metrics().button_h);
+        let button_bg = if self.theme.is_modern() && btn.pressed && enabled {
+            self.theme.palette().accent
+        } else if self.theme.is_modern() && hovered {
+            self.theme.palette().highlight
+        } else {
+            self.theme.palette().face
+        };
+        fb.fill(ax, ay, btn.width, self.theme.metrics().button_h, fb.pack(button_bg));
+        if btn.pressed && enabled { self.border_sunken(fb, ax, ay, btn.width, self.theme.metrics().button_h); }
+        else                      { self.border_raised(fb, ax, ay, btn.width, self.theme.metrics().button_h); }
 
         let shift    = if btn.pressed && enabled { 1i32 } else { 0 };
         let tw       = self.text_w(btn.label);
         let off      = if tw < btn.width as i32 { (btn.width as i32 - tw) / 2 } else { 0 };
-        let baseline = ay + (WBTN_H as i32 + self.ascent) / 2;
-        let tc = if enabled { Color::WINDOW_TEXT } else { Color::SHADOW };
+        let baseline = ay + (self.theme.metrics().button_h as i32 + self.ascent) / 2;
+        let tc = if enabled { self.theme.palette().window_text } else { self.theme.palette().disabled_text };
         fb.text_aa(ax + off + shift, baseline + shift,
                    btn.label, tc, &self.font, self.font_px);
     }
@@ -2876,16 +3203,16 @@ impl WindowManager {
         let ay = oy + pb.rel_y;
         let lw = self.label_px(pb.label);
         let baseline = ay + self.ascent + (PBAR_H as i32 - self.ascent) / 2;
-        fb.text_aa(ax, baseline, pb.label, Color::SHADOW, &self.font, self.font_px);
+        fb.text_aa(ax, baseline, pb.label, self.theme.palette().label_text, &self.font, self.font_px);
 
         let bx = ax + lw;
-        fb.fill(bx, ay, pb.width, PBAR_H, fb.pack(Color::WINDOW));
-        fb.border_sunken(bx, ay, pb.width, PBAR_H);
+        fb.fill(bx, ay, pb.width, PBAR_H, fb.pack(self.theme.palette().window));
+        self.border_sunken(fb, bx, ay, pb.width, PBAR_H);
 
         if pb.max > 0 {
             let fill_w = ((pb.value as u64 * (pb.width as u64 - 4)) / pb.max as u64) as u32;
             if fill_w > 0 {
-                fb.fill(bx + 2, ay + 2, fill_w, PBAR_H - 4, fb.pack(Color::ACT_L));
+                fb.fill(bx + 2, ay + 2, fill_w, PBAR_H - 4, fb.pack(self.theme.palette().accent));
             }
         }
     }
@@ -2895,29 +3222,32 @@ impl WindowManager {
         let ax = ox + s.rel_x;
         let ay = oy + s.rel_y;
         let lw = self.label_px(s.label);
-        let baseline = ay + self.ascent + (SLIDER_H as i32 - self.ascent) / 2;
-        fb.text_aa(ax, baseline, s.label, Color::SHADOW, &self.font, self.font_px);
+        let baseline = ay + self.ascent + (self.theme.metrics().slider_h as i32 - self.ascent) / 2;
+        fb.text_aa(ax, baseline, s.label, self.theme.palette().label_text, &self.font, self.font_px);
 
         let bx    = ax + lw;
         let track_w = s.width as i32 - SLIDER_THW;
         if track_w <= 0 { return; }
 
         // Track
-        let track_y = ay + SLIDER_H as i32 / 2 - 2;
-        fb.fill(bx, track_y, s.width, 4, fb.pack(Color::WINDOW));
-        fb.border_sunken(bx, track_y, s.width, 4);
+        let track_y = ay + self.theme.metrics().slider_h as i32 / 2 - 2;
+        fb.fill(bx, track_y, s.width, 4, fb.pack(self.theme.palette().window));
+        self.border_sunken(fb, bx, track_y, s.width, 4);
 
         // Thumb
         let range = (s.max - s.min).max(1);
         let thumb_x = bx + (s.value - s.min) * track_w / range;
         let thumb_y = ay + 1;
-        let thumb_h = SLIDER_H - 2;
-        let face_c = if enabled { Color::FACE } else { Color::SHADOW };
+        let thumb_h = self.theme.metrics().slider_h - 2;
+        let thumb_hover = enabled && self.cursor_in(thumb_x, thumb_y, SLIDER_THW as u32, thumb_h);
+        let face_c = if self.theme.is_modern() && thumb_hover { self.theme.palette().accent }
+                     else if enabled { self.theme.palette().face }
+                     else { self.theme.palette().disabled_text };
         fb.fill(thumb_x, thumb_y, SLIDER_THW as u32, thumb_h, fb.pack(face_c));
         if focused && enabled {
-            fb.border_sunken(thumb_x, thumb_y, SLIDER_THW as u32, thumb_h);
+            self.border_sunken(fb, thumb_x, thumb_y, SLIDER_THW as u32, thumb_h);
         } else {
-            fb.border_raised(thumb_x, thumb_y, SLIDER_THW as u32, thumb_h);
+            self.border_raised(fb, thumb_x, thumb_y, SLIDER_THW as u32, thumb_h);
         }
     }
 
@@ -2926,22 +3256,28 @@ impl WindowManager {
         let ax = ox + n.rel_x;
         let ay = oy + n.rel_y;
         let lw = self.label_px(n.label);
-        let baseline = ay + self.ascent + (NUD_H as i32 - self.ascent) / 2;
-        fb.text_aa(ax, baseline, n.label, Color::SHADOW, &self.font, self.font_px);
+        let baseline = ay + self.ascent + (self.theme.metrics().nud_h as i32 - self.ascent) / 2;
+        fb.text_aa(ax, baseline, n.label, self.theme.palette().label_text, &self.font, self.font_px);
 
         // Value box
         let bx = ax + lw;
-        let bg = if enabled { Color::WINDOW } else { Color::FACE };
-        fb.fill(bx, ay, n.width, NUD_H, fb.pack(bg));
-        fb.border_sunken(bx, ay, n.width, NUD_H);
+        let bg = if enabled { self.theme.palette().window } else { self.theme.palette().face };
+        fb.fill(bx, ay, n.width, self.theme.metrics().nud_h, fb.pack(bg));
+        self.border_sunken(fb, bx, ay, n.width, self.theme.metrics().nud_h);
+        if self.theme.is_modern() && enabled
+            && self.cursor_in(bx, ay, n.width + NUD_BTN_W as u32, self.theme.metrics().nud_h)
+        {
+            fb.rect_outline(bx, ay, n.width + NUD_BTN_W as u32, self.theme.metrics().nud_h,
+                    fb.pack(self.theme.palette().accent));
+        }
 
         // Value text: edit buffer (left-aligned + cursor) while typing, value (right-aligned) otherwise
-        let tc = if enabled { Color::WINDOW_TEXT } else { Color::SHADOW };
+        let tc = if enabled { self.theme.palette().window_text } else { self.theme.palette().disabled_text };
         if let Some(ref buf) = n.edit_buf {
             let max_px = n.width as i32 - 10;
             let visible = self.fit_right(buf, max_px);
             let ex = fb.text_aa(bx + 3, baseline, visible, tc, &self.font, self.font_px);
-            fb.text_aa(ex, baseline, "|", Color::ACT_L, &self.font, self.font_px);
+            fb.text_aa(ex, baseline, "|", self.theme.palette().accent, &self.font, self.font_px);
         } else {
             let mut vbuf = [0u8; 16];
             let vstr = fmt_i32(n.value, &mut vbuf);
@@ -2951,26 +3287,40 @@ impl WindowManager {
         }
 
         if focused && enabled {
-            fb.fill(bx, ay, n.width, 1, fb.pack(Color::ACT_L));
-            fb.fill(bx, ay + NUD_H as i32 - 1, n.width, 1, fb.pack(Color::ACT_L));
+            fb.fill(bx, ay, n.width, 1, fb.pack(self.theme.palette().accent));
+            fb.fill(bx, ay + self.theme.metrics().nud_h as i32 - 1, n.width, 1, fb.pack(self.theme.palette().accent));
         }
 
         // Up/Down buttons
         let btn_x = bx + n.width as i32;
-        let half_h = NUD_H as i32 / 2;
-        let bc = fb.pack(Color::FACE);
-        let k  = fb.pack(Color::BLACK);
+        let half_h = self.theme.metrics().nud_h as i32 / 2;
+        let bc = fb.pack(self.theme.palette().face);
+        let k  = fb.pack(self.theme.palette().window_text);
         // Up button
         fb.fill(btn_x, ay, NUD_BTN_W as u32, half_h as u32, bc);
-        fb.border_raised(btn_x, ay, NUD_BTN_W as u32, half_h as u32);
+        self.border_raised(fb, btn_x, ay, NUD_BTN_W as u32, half_h as u32);
         let tcx = btn_x + NUD_BTN_W / 2;
         let tcy = ay + half_h / 2;
-        for row in 0i32..3 { for _col in -row..=row { fb.set_i(tcx + row - 2, tcy - row + 1, k); } }
+        if self.theme.is_modern() {
+            for i in 0i32..4 {
+                fb.set_i(tcx - 4 + i, tcy + 1 - i, k);
+                fb.set_i(tcx + 4 - i, tcy + 1 - i, k);
+            }
+        } else {
+            for row in 0i32..3 { for _col in -row..=row { fb.set_i(tcx + row - 2, tcy - row + 1, k); } }
+        }
         // Down button
-        fb.fill(btn_x, ay + half_h, NUD_BTN_W as u32, (NUD_H as i32 - half_h) as u32, bc);
-        fb.border_raised(btn_x, ay + half_h, NUD_BTN_W as u32, (NUD_H as i32 - half_h) as u32);
-        let tcy2 = ay + half_h + (NUD_H as i32 - half_h) / 2;
-        for row in 0i32..3 { for _col in -row..=row { fb.set_i(tcx + row - 2, tcy2 + row - 1, k); } }
+        fb.fill(btn_x, ay + half_h, NUD_BTN_W as u32, (self.theme.metrics().nud_h as i32 - half_h) as u32, bc);
+        self.border_raised(fb, btn_x, ay + half_h, NUD_BTN_W as u32, (self.theme.metrics().nud_h as i32 - half_h) as u32);
+        let tcy2 = ay + half_h + (self.theme.metrics().nud_h as i32 - half_h) / 2;
+        if self.theme.is_modern() {
+            for i in 0i32..4 {
+                fb.set_i(tcx - 4 + i, tcy2 - 1 + i, k);
+                fb.set_i(tcx + 4 - i, tcy2 - 1 + i, k);
+            }
+        } else {
+            for row in 0i32..3 { for _col in -row..=row { fb.set_i(tcx + row - 2, tcy2 + row - 1, k); } }
+        }
     }
 
     fn draw_groupbox(&self, fb: &mut Framebuffer, gb: &GroupBox, ox: i32, oy: i32) {
@@ -2979,8 +3329,8 @@ impl WindowManager {
         let lw = self.text_w(gb.label) + 8;
 
         // Border with gap for the label
-        let sh = fb.pack(Color::SHADOW);
-        let hi = fb.pack(Color::HIGHLIGHT);
+        let sh = fb.pack(self.theme.palette().shadow);
+        let hi = fb.pack(self.theme.palette().highlight);
         let by = ay + GROUPBOX_T;
 
         // Top: gap at label position
@@ -3000,14 +3350,14 @@ impl WindowManager {
         // Label
         let lx = ax + 10;
         let ly = ay + self.ascent;
-        fb.text_aa(lx, ly, gb.label, Color::WINDOW_TEXT, &self.font, self.font_px);
+        fb.text_aa(lx, ly, gb.label, self.theme.palette().window_text, &self.font, self.font_px);
     }
 
     fn draw_separator(&self, fb: &mut Framebuffer, sep: &Separator, ox: i32, oy: i32) {
         let ax = ox + sep.rel_x;
         let ay = oy + sep.rel_y;
-        fb.fill(ax, ay,     sep.width, 1, fb.pack(Color::SHADOW));
-        fb.fill(ax, ay + 1, sep.width, 1, fb.pack(Color::HIGHLIGHT));
+        fb.fill(ax, ay,     sep.width, 1, fb.pack(self.theme.palette().shadow));
+        fb.fill(ax, ay + 1, sep.width, 1, fb.pack(self.theme.palette().highlight));
     }
 
     // -----------------------------------------------------------------------
@@ -3040,6 +3390,7 @@ fn msgbox_loop(
     font: &fontdue::Font, ascent: i32, font_px: f32,
     title: &'static str, text: &'static str, buttons: &MsgBoxButtons,
     sw: u32, sh: u32, cx: &mut i32, cy: &mut i32,
+    palette: Palette, modern: bool,
 ) -> MsgBoxResult {
     let dw: u32 = 360;
     let dh: u32 = 140;
@@ -3063,12 +3414,12 @@ fn msgbox_loop(
                 InputEvent::LeftButton(true) => {
                     let result = match buttons {
                         MsgBoxButtons::Ok => {
-                            if btn_hit(*cx, *cy, msgbox_btn_rect(dlg_x, dlg_y, dw, dh, 0, 1)) {
+                            if btn_hit(*cx, *cy, msgbox_btn_rect(dlg_x, dlg_y, dw, dh, 0, 1, modern)) {
                                 Some(MsgBoxResult::Ok) } else { None }
                         }
                         MsgBoxButtons::YesNo => {
-                            let ry = msgbox_btn_rect(dlg_x, dlg_y, dw, dh, 0, 2);
-                            let rn = msgbox_btn_rect(dlg_x, dlg_y, dw, dh, 1, 2);
+                            let ry = msgbox_btn_rect(dlg_x, dlg_y, dw, dh, 0, 2, modern);
+                            let rn = msgbox_btn_rect(dlg_x, dlg_y, dw, dh, 1, 2, modern);
                             if      btn_hit(*cx, *cy, ry) { Some(MsgBoxResult::Yes) }
                             else if btn_hit(*cx, *cy, rn) { Some(MsgBoxResult::No)  }
                             else                          { None }
@@ -3090,8 +3441,10 @@ fn msgbox_loop(
         }
 
         fb.pixels_mut().copy_from_slice(background);
-        draw_msgbox_frame(fb, dlg_x, dlg_y, dw, dh, title, text, buttons, font, ascent, font_px);
-        draw_cursor(fb, *cx, *cy);
+        draw_msgbox_frame(fb, dlg_x, dlg_y, dw, dh, title, text, buttons,
+                          font, ascent, font_px, palette, modern, *cx, *cy);
+        if modern { draw_cursor_modern(fb, *cx, *cy); }
+        else { draw_cursor(fb, *cx, *cy); }
         fb.present_to(gop_fb, gop_stride);
     }
 }
@@ -3100,54 +3453,77 @@ fn draw_msgbox_frame(
     fb: &mut Framebuffer, dx: i32, dy: i32, dw: u32, dh: u32,
     title: &'static str, text: &'static str, buttons: &MsgBoxButtons,
     font: &fontdue::Font, ascent: i32, font_px: f32,
+    palette: Palette, modern: bool, cursor_x: i32, cursor_y: i32,
 ) {
-    let face = fb.pack(Color::FACE);
-    let sh   = fb.pack(Color::SHADOW);
+    let face = fb.pack(palette.face);
+    let sh   = fb.pack(palette.shadow);
     fb.fill(dx, dy, dw, dh, face);
-    fb.border_raised(dx, dy, dw, dh);
+    if modern {
+        fb.rect_outline(dx, dy, dw, dh, fb.pack(palette.frame));
+    } else {
+        fb.border_raised_with(dx, dy, dw, dh, palette.frame, palette.highlight,
+                              palette.shadow, palette.dark_shadow);
+    }
 
-    let tx = dx + BORDER; let ty = dy + BORDER;
-    let tw = dw - (BORDER * 2) as u32;
-    fb.gradient_h(tx, ty, tw, TITLE_H as u32, Color::ACT_L, Color::ACT_R);
+    let border = if modern { 1 } else { BORDER };
+    let title_h = if modern { 32 } else { TITLE_H };
+    let tx = dx + border; let ty = dy + border;
+    let tw = dw - (border * 2) as u32;
+    if modern { fb.fill(tx, ty, tw, title_h as u32, fb.pack(palette.active_l)); }
+    else { fb.gradient_h(tx, ty, tw, title_h as u32, palette.active_l, palette.active_r); }
     let title_w   = Framebuffer::text_width(title, font, font_px);
     let title_off = if title_w < tw as i32 { (tw as i32 - title_w) / 2 } else { 0 };
-    let t_base    = ty + (TITLE_H + ascent) / 2;
-    fb.text_aa(tx + title_off, t_base, title, Color::ACT_TEXT, font, font_px);
-    fb.fill(tx, ty + TITLE_H, tw, 1, sh);
+    let t_base    = ty + (title_h + ascent) / 2;
+    fb.text_aa(tx + title_off, t_base, title, palette.active_text, font, font_px);
+    fb.fill(tx, ty + title_h, tw, 1, sh);
 
-    let text_base = ty + TITLE_H + 1 + 10 + ascent;
-    fb.text_centered_aa(dx, dw, text_base, text, Color::WINDOW_TEXT, font, font_px);
+    let text_base = ty + title_h + 1 + 10 + ascent;
+    fb.text_centered_aa(dx, dw, text_base, text, palette.window_text, font, font_px);
 
     match buttons {
         MsgBoxButtons::Ok => {
-            draw_dlg_btn(fb, msgbox_btn_rect(dx, dy, dw, dh, 0, 1), "OK", font, ascent, font_px);
+            let r = msgbox_btn_rect(dx, dy, dw, dh, 0, 1, modern);
+            draw_dlg_btn(fb, r, "OK", font, ascent, font_px, palette, modern,
+                         btn_hit(cursor_x, cursor_y, r));
         }
         MsgBoxButtons::YesNo => {
-            draw_dlg_btn(fb, msgbox_btn_rect(dx, dy, dw, dh, 0, 2), "Yes", font, ascent, font_px);
-            draw_dlg_btn(fb, msgbox_btn_rect(dx, dy, dw, dh, 1, 2), "No",  font, ascent, font_px);
+            let yes = msgbox_btn_rect(dx, dy, dw, dh, 0, 2, modern);
+            let no = msgbox_btn_rect(dx, dy, dw, dh, 1, 2, modern);
+            draw_dlg_btn(fb, yes, "Yes", font, ascent, font_px, palette, modern,
+                         btn_hit(cursor_x, cursor_y, yes));
+            draw_dlg_btn(fb, no, "No", font, ascent, font_px, palette, modern,
+                         btn_hit(cursor_x, cursor_y, no));
         }
     }
 }
 
 fn msgbox_btn_rect(dx: i32, dy: i32, dw: u32, dh: u32,
-                   idx: u32, total: u32) -> (i32, i32, u32, u32) {
+                   idx: u32, total: u32, modern: bool) -> (i32, i32, u32, u32) {
     let bw: u32  = 80;
     let gap: i32 = 16;
     let total_w  = bw as i32 * total as i32 + gap * (total as i32 - 1);
     let bx = dx + (dw as i32 - total_w) / 2 + idx as i32 * (bw as i32 + gap);
-    let by = dy + dh as i32 - 14 - WBTN_H as i32;
-    (bx, by, bw, WBTN_H)
+    let bh = if modern { 30 } else { WBTN_H };
+    let by = dy + dh as i32 - 14 - bh as i32;
+    (bx, by, bw, bh)
 }
 
 fn draw_dlg_btn(fb: &mut Framebuffer, r: (i32, i32, u32, u32),
-                label: &str, font: &fontdue::Font, ascent: i32, font_px: f32) {
+                label: &str, font: &fontdue::Font, ascent: i32, font_px: f32,
+                palette: Palette, modern: bool, hovered: bool) {
     let (bx, by, bw, bh) = r;
-    fb.fill(bx, by, bw, bh, fb.pack(Color::FACE));
-    fb.border_raised(bx, by, bw, bh);
+    let bg = if modern && hovered { palette.highlight } else { palette.face };
+    fb.fill(bx, by, bw, bh, fb.pack(bg));
+    if modern {
+        fb.rect_outline(bx, by, bw, bh, fb.pack(palette.frame));
+    } else {
+        fb.border_raised_with(bx, by, bw, bh, palette.frame, palette.highlight,
+                              palette.shadow, palette.dark_shadow);
+    }
     let tw   = Framebuffer::text_width(label, font, font_px);
     let off  = if tw < bw as i32 { (bw as i32 - tw) / 2 } else { 0 };
     let base = by + (bh as i32 + ascent) / 2;
-    fb.text_aa(bx + off, base, label, Color::WINDOW_TEXT, font, font_px);
+    fb.text_aa(bx + off, base, label, palette.window_text, font, font_px);
 }
 
 fn btn_hit(cx: i32, cy: i32, r: (i32, i32, u32, u32)) -> bool {
@@ -3195,6 +3571,39 @@ fn draw_cursor(fb: &mut Framebuffer, x: i32, y: i32) {
                 'B' => fb.set_i(px, py, black),
                 'W' => fb.set_i(px, py, white),
                 _ => {} // Transparent, do nothing
+            }
+        }
+    }
+}
+
+fn draw_cursor_modern(fb: &mut Framebuffer, x: i32, y: i32) {
+    // Compact, high-contrast pointer used by the modern themes.
+    const CURSOR: [&str; 16] = [
+        "B...............",
+        "BWB.............",
+        "BWWB............",
+        "BWWWB...........",
+        "BWWWWB..........",
+        "BWWWWWB.........",
+        "BWWWWWWB........",
+        "BWWWWWWWB.......",
+        "BWWWWBBBBB......",
+        "BWWBWB...........",
+        "BWB.BWB..........",
+        "BB..BWB..........",
+        "....BWWB.........",
+        "....BWWB.........",
+        ".....BB..........",
+        "................",
+    ];
+    let outline = fb.pack(Color::rgb(0x0F, 0x17, 0x2A));
+    let fill = fb.pack(Color::WHITE);
+    for (row, bits) in CURSOR.iter().enumerate() {
+        for (col, ch) in bits.chars().enumerate() {
+            match ch {
+                'B' => fb.set_i(x + col as i32, y + row as i32, outline),
+                'W' => fb.set_i(x + col as i32, y + row as i32, fill),
+                _ => {}
             }
         }
     }

@@ -3,7 +3,7 @@
 //! # Modules
 //! - [`gfx`] — software framebuffer and antialiased drawing primitives.
 //! - [`input`] — keyboard and pointer input from UEFI protocols and direct PS/2 I/O.
-//! - [`wm`] — floating window manager with widgets (Windows 2000 visual style).
+//! - [`wm`] — themed floating window manager with widgets.
 //!
 //! # Minimal usage
 //! ```ignore
@@ -13,6 +13,7 @@
 //!
 //! let mut fb  = gfx::Framebuffer::new(width, height, pixel_format).unwrap();
 //! let mut wm  = wm::WindowManager::new(width, height, FONT, 16.0);
+//! wm.set_theme(wm::Theme::Dark); // Light is the default; Classic is also available.
 //! let mut drv = input::InputDriver::new(width, height);
 //! // Build the UI, then enter the library-owned event loop.
 //! wm.run(&mut fb, &mut drv, gop.frame_buffer(), gop_stride);

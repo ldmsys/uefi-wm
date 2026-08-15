@@ -246,10 +246,18 @@ impl Framebuffer {
 
     /// Draws the toolkit's two-pixel raised border.
     pub fn border_raised(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        let fr = self.pack(Color::FRAME);
-        let hi = self.pack(Color::HIGHLIGHT);
-        let sh = self.pack(Color::SHADOW);
-        let dk = self.pack(Color::DARK_SHADOW);
+        self.border_raised_with(x, y, w, h, Color::FRAME, Color::HIGHLIGHT,
+                                Color::SHADOW, Color::DARK_SHADOW);
+    }
+
+    /// Draws a two-pixel raised border with caller-selected palette colors.
+    pub fn border_raised_with(&mut self, x: i32, y: i32, w: u32, h: u32,
+                              frame: Color, highlight: Color,
+                              shadow: Color, dark_shadow: Color) {
+        let fr = self.pack(frame);
+        let hi = self.pack(highlight);
+        let sh = self.pack(shadow);
+        let dk = self.pack(dark_shadow);
         self.fill(x,                y,                w, 1, fr);
         self.fill(x,                y,                1, h, fr);
         self.fill(x + w as i32 - 1, y,                1, h, dk);
@@ -264,9 +272,16 @@ impl Framebuffer {
 
     /// Draws the toolkit's two-pixel sunken border.
     pub fn border_sunken(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        let hi = self.pack(Color::HIGHLIGHT);
-        let sh = self.pack(Color::SHADOW);
-        let dk = self.pack(Color::DARK_SHADOW);
+        self.border_sunken_with(x, y, w, h, Color::HIGHLIGHT,
+                                Color::SHADOW, Color::DARK_SHADOW);
+    }
+
+    /// Draws a two-pixel sunken border with caller-selected palette colors.
+    pub fn border_sunken_with(&mut self, x: i32, y: i32, w: u32, h: u32,
+                              highlight: Color, shadow: Color, dark_shadow: Color) {
+        let hi = self.pack(highlight);
+        let sh = self.pack(shadow);
+        let dk = self.pack(dark_shadow);
         self.fill(x,                y,                w, 1, sh);
         self.fill(x,                y,                1, h, sh);
         self.fill(x + w as i32 - 1, y,                1, h, hi);
