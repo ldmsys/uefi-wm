@@ -1,22 +1,15 @@
-//! Input drivers: keyboard via EFI_SIMPLE_TEXT_INPUT, mouse via i8042 PS/2.
+//! Keyboard and pointer input for the window manager.
 //!
-//! Mouse strategy
-//! --------------
-//! OVMF (the Ubuntu package) ships without Ps2MouseDxe or
-//! UsbMouseAbsolutePointerDxe, so EFI_SIMPLE_POINTER_PROTOCOL and
-//! EFI_ABSOLUTE_POINTER_PROTOCOL never receive hardware events.  We fall
-//! back to direct PS/2 port I/O:
+//! [`InputDriver`] exclusively opens EFI Simple Text Input, then probes EFI
+//! Absolute Pointer, EFI Simple Pointer, and direct i8042 PS/2. Each call to
+//! [`InputDriver::read_ptr`] polls every available source in that order; the
+//! PS/2 path is not conditional on the EFI sources being idle. All sources
+//! update the same cached button state, so edges are relative to the preceding
+//! observation even when it came from another source.
 //!
-//!   - Port 0x64: i8042 status/command register.
-//!   - Port 0x60: i8042 data register.
-//!
-//! The q35 machine always has an i8042 with PS/2 mouse (#2 in QEMU's mouse
-//! list).  Because our keyboard is on xHCI USB, i8042 is unused by OVMF and
-//! safe for us to own.  We initialize the PS/2 mouse (enable reporting) and
-//! poll the data port each timer tick.
-//!
-//! We still try EFI_ABSOLUTE_POINTER_PROTOCOL first (for real USB tablets on
-//! physical hardware) and fall through to PS/2 only when that yields nothing.
+//! The direct PS/2 path uses port `0x64` for status/commands and `0x60` for
+//! data. It is disabled when initialization does not receive a `0xFA`
+//! acknowledgement from the mouse.
 
 extern crate alloc;
 
@@ -38,19 +31,23 @@ use uefi_raw::protocol::console::{
 #[derive(Debug)]
 #[repr(transparent)]
 #[unsafe_protocol(AbsolutePointerProtocol::GUID)]
+/// Thin wrapper for the raw EFI Absolute Pointer protocol used by UEFI 0.33.
 pub struct AbsolutePointer(AbsolutePointerProtocol);
 
 impl AbsolutePointer {
+    /// Reads one state, returning `None` for every EFI status except success.
     pub fn read_state(&mut self) -> Option<AbsolutePointerState> {
         let mut s = AbsolutePointerState::default();
         let ok = unsafe { (self.0.get_state)(&self.0, &mut s) };
         if ok == Status::SUCCESS { Some(s) } else { None }
     }
 
+    /// Returns the protocol's mode structure.
     pub fn mode(&self) -> &AbsolutePointerMode {
         unsafe { &*self.0.mode }
     }
 
+    /// Wraps the protocol's wait event, or returns `None` for a null event.
     pub fn wait_for_input_event(&self) -> Option<Event> {
         unsafe { Event::from_ptr(self.0.wait_for_input) }
     }
@@ -63,10 +60,8 @@ impl AbsolutePointer {
 /// Reads PS/2 mouse data directly from the i8042 ports.
 ///
 /// The i8042 has two channels: keyboard (IRQ 1) and mouse/auxiliary (IRQ 12).
-/// Status register (0x64) bits:
-///   0  OBF  – output-buffer full; data ready to read from 0x60
-///   1  IBF  – input-buffer full; do not write until clear
-///   5  AUX  – OBF data came from mouse channel (not keyboard)
+/// Relevant status-register (`0x64`) bits are 0 (output full), 1 (input full),
+/// and 5 (output came from the auxiliary channel).
 struct Ps2Mouse {
     /// Partial packet accumulator; PS/2 mouse sends 3-byte packets.
     buf:       [u8; 3],
@@ -131,8 +126,9 @@ impl Ps2Mouse {
         ack == 0xFA
     }
 
-    /// Drain all available PS/2 mouse bytes; collect complete 3-byte packets.
-    /// Returns a list of (dx, dy, btn_mask) tuples (one per complete packet).
+    /// Drains complete three-byte PS/2 packets as `(dx, dy, button_mask)`.
+    ///
+    /// Overflowed packets are discarded and Y is converted to screen direction.
     pub fn poll(&mut self) -> alloc::vec::Vec<(i32, i32, u8)> {
         let mut out = alloc::vec::Vec::new();
         unsafe {
@@ -171,13 +167,29 @@ impl Ps2Mouse {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
+/// A normalized keyboard or pointer event.
 pub enum InputEvent {
+    /// A UEFI keyboard event.
     Key(Key),
-    /// Relative movement (SimplePointerProtocol / usb-mouse).
-    MouseMove  { dx: i64, dy: i64 },
-    /// Absolute cursor position in screen pixels (AbsolutePointer / usb-tablet).
-    MouseAbs   { x: i32, y: i32 },
+    /// Relative movement from EFI Simple Pointer or direct PS/2.
+    MouseMove  {
+        /// Horizontal delta; positive values move right.
+        dx: i64,
+        /// Vertical delta; positive values move down.
+        dy: i64,
+    },
+    /// Absolute cursor position scaled to screen pixels.
+    MouseAbs   {
+        /// Horizontal screen coordinate.
+        x: i32,
+        /// Vertical screen coordinate.
+        y: i32,
+    },
+    /// Left-button state transition (`true` means pressed).
     LeftButton (bool),
+    /// Right-button state transition (`true` means pressed).
+    ///
+    /// [`crate::wm::WindowManager`] currently ignores this variant.
     RightButton(bool),
 }
 
@@ -185,7 +197,7 @@ pub enum InputEvent {
 // InputDriver
 // ---------------------------------------------------------------------------
 
-/// Holds open protocol handles for the lifetime of the application.
+/// Owns keyboard and pointer protocol handles for the application lifetime.
 pub struct InputDriver {
     kbd:        boot::ScopedProtocol<Input>,
     abs:        Option<boot::ScopedProtocol<AbsolutePointer>>,
@@ -197,9 +209,13 @@ pub struct InputDriver {
     sw:         u32,
     sh:         u32,
 
+    /// Whether any EFI pointer protocol opened or direct PS/2 initialized.
     pub ptr_found: bool,
-    /// true = using AbsolutePointer (tablet); false = SimplePointer (mouse)
+    /// Whether an accepted Absolute Pointer handle was opened.
+    ///
+    /// This does not indicate exclusive or most-recent pointer use.
     pub use_abs:   bool,
+    /// Whether EFI Simple Pointer was opened.
     pub rel_found: bool,
 
     // Cached coordinate range from AbsolutePointerMode (static after init).
@@ -214,15 +230,27 @@ pub struct InputDriver {
     rel_wait: Option<Event>,
 
     // ---- diagnostics (updated every read_ptr call) ----
+    /// Number of successful Absolute Pointer reads, with wrapping addition.
     pub abs_reads: u32,
-    pub abs_rx_init: u64,  // initial abs range at init time (shows which device was found)
+    /// Absolute Pointer X range captured during construction.
+    pub abs_rx_init: u64,
+    /// X range copied after the most recent successful absolute read.
     pub mode_rx:   u64,
+    /// Y range copied after the most recent successful absolute read.
     pub mode_ry:   u64,
+    /// Raw X coordinate from the most recent successful absolute read.
     pub raw_x:     u64,
+    /// Raw Y coordinate from the most recent successful absolute read.
     pub raw_y:     u64,
 }
 
 impl InputDriver {
+    /// Opens the keyboard and all available pointer paths.
+    ///
+    /// # Panics
+    ///
+    /// Panics when EFI Simple Text Input cannot be located or opened
+    /// exclusively. Pointer discovery failures are tolerated.
     pub fn new(sw: u32, sh: u32) -> Self {
         let kbd_h = boot::get_handle_for_protocol::<Input>()
             .expect("no keyboard handle");
@@ -300,14 +328,9 @@ impl InputDriver {
         }
     }
 
-    /// Scan all EFI_ABSOLUTE_POINTER_PROTOCOL handles and return the first one
-    /// whose mode reports a non-zero coordinate range (i.e. a real device).
-    /// Scan all EFI_ABSOLUTE_POINTER_PROTOCOL handles and return the first real
-    /// pointing device.  Two spurious handles must be skipped:
-    ///   - ConSplitter stub: reports rx = 0 before any real device is attached.
-    ///   - VMMouse (OVMF VmmouseDxe on ISA bus): reports a non-zero Z-axis range
-    ///     and requires VMware guest initialisation that never happens in UEFI.
-    ///     If we accidentally use it every GetState returns EFI_NOT_READY forever.
+    // Scan all Absolute Pointer handles and take the first with nonzero X/Y
+    // ranges and a zero Z range. This rejects zero-range ConSplitter stubs and
+    // the nonzero-Z VMMouse handle.
     fn find_live_abs() -> Option<boot::ScopedProtocol<AbsolutePointer>> {
         use uefi::boot::SearchType;
         use uefi_raw::protocol::console::AbsolutePointerProtocol;
@@ -342,9 +365,11 @@ impl InputDriver {
         None
     }
 
-    /// UEFI wait events for `boot::wait_for_event`.
-    /// Slot 0: keyboard; slot 1+: abs/rel pointer (whichever were found).
-    /// Caller appends the frame timer before calling wait_for_event.
+    /// Returns cached UEFI wait-event clones in keyboard, absolute, relative order.
+    ///
+    /// Unavailable events are omitted. The standard window-manager loop assumes
+    /// the normally present keyboard event occupies slot 0 and appends its frame
+    /// timer after this list.
     pub fn wait_events(&self) -> Vec<Event> {
         let mut v = Vec::with_capacity(3);
         if let Some(ref e) = self.kbd_wait {
@@ -371,7 +396,11 @@ impl InputDriver {
         out
     }
 
-    /// Read current pointer state and return any changes as events.
+    /// Polls every available pointer source and returns normalized changes.
+    ///
+    /// Sources are checked in Absolute Pointer, Simple Pointer, direct PS/2
+    /// order. The PS/2 byte stream is drained; each EFI protocol is read once.
+    /// A single result may contain movement from more than one source.
     pub fn read_ptr(&mut self) -> Vec<InputEvent> {
         let mut out = Vec::new();
 

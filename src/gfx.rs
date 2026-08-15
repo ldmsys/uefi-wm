@@ -1,28 +1,37 @@
 //! Software framebuffer and drawing primitives.
 //!
-//! Text is rendered with fontdue (grayscale antialiasing).  Each glyph's
+//! Text is rendered with `fontdue` grayscale antialiasing. Each glyph's
 //! coverage bitmap is alpha-blended over whatever is already in the buffer,
 //! so the caller fills regions with `fill()` before drawing text on top.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use uefi::proto::console::gop::PixelFormat;
+use uefi::proto::console::gop::{FrameBuffer as GopFrameBuffer, PixelFormat};
 
 // ---------------------------------------------------------------------------
 // Colour
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
+/// An eight-bit RGB color independent of GOP's packed pixel order.
 pub struct Color {
+    /// Red component.
     pub r: u8,
+    /// Green component.
     pub g: u8,
+    /// Blue component.
     pub b: u8,
 }
 
 impl Color {
+    /// Constructs an RGB color.
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self { Self { r, g, b } }
 
+    /// Linearly interpolates from `a` to `b` at `t / total`.
+    ///
+    /// Returns `a` when `total` is zero. Callers must keep `t <= total`; a
+    /// larger `t` underflows `total - t` in debug builds.
     pub fn lerp(a: Color, b: Color, t: u32, total: u32) -> Color {
         if total == 0 { return a; }
         let inv = total - t;
@@ -33,22 +42,39 @@ impl Color {
         )
     }
 
+    /// Black.
     pub const BLACK:       Color = Color::rgb(0x00, 0x00, 0x00);
+    /// White.
     pub const WHITE:       Color = Color::rgb(0xFF, 0xFF, 0xFF);
+    /// Desktop teal.
     pub const DESKTOP:     Color = Color::rgb(0x00, 0x80, 0x80);
+    /// Standard control face.
     pub const FACE:        Color = Color::rgb(0xD4, 0xD0, 0xC8);
+    /// Light 3-D border edge.
     pub const HIGHLIGHT:   Color = Color::rgb(0xFF, 0xFF, 0xFF);
+    /// Dark 3-D border edge.
     pub const SHADOW:      Color = Color::rgb(0x80, 0x80, 0x80);
+    /// Darkest 3-D border edge.
     pub const DARK_SHADOW: Color = Color::rgb(0x40, 0x40, 0x40);
+    /// Black outer frame.
     pub const FRAME:       Color = Color::rgb(0x00, 0x00, 0x00);
+    /// Active-title gradient start.
     pub const ACT_L:       Color = Color::rgb(0x00, 0x00, 0x80);
+    /// Active-title gradient end.
     pub const ACT_R:       Color = Color::rgb(0x10, 0x84, 0xD0);
+    /// Inactive-title gradient start.
     pub const INACT_L:     Color = Color::rgb(0x7B, 0x7B, 0x7B);
+    /// Inactive-title gradient end.
     pub const INACT_R:     Color = Color::rgb(0xB5, 0xB5, 0xB5);
+    /// Active-title text.
     pub const ACT_TEXT:    Color = Color::rgb(0xFF, 0xFF, 0xFF);
+    /// Inactive-title text.
     pub const INACT_TEXT:  Color = Color::rgb(0xD4, 0xD0, 0xC8);
+    /// Window background.
     pub const WINDOW:      Color = Color::rgb(0xFF, 0xFF, 0xFF);
+    /// Window foreground text.
     pub const WINDOW_TEXT: Color = Color::rgb(0x00, 0x00, 0x00);
+    /// Taskbar color retained by the visual palette.
     pub const TASKBAR:     Color = Color::rgb(0xD4, 0xD0, 0xC8);
 }
 
@@ -56,26 +82,65 @@ impl Color {
 // Framebuffer
 // ---------------------------------------------------------------------------
 
+/// A tightly packed software back-buffer using GOP-native `u32` pixels.
 pub struct Framebuffer {
-    pub buf:    Vec<u32>,
-    pub width:  u32,
-    pub height: u32,
+    buf:        Vec<u32>,
+    width:      u32,
+    height:     u32,
     fmt:        PixelFormat,
 }
 
+/// Error returned when a software framebuffer cannot be allocated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FramebufferError {
+    /// `width * height` cannot be represented as a `usize` pixel count.
+    DimensionsOverflow,
+    /// The allocator could not reserve storage for every pixel.
+    AllocationFailed,
+}
+
 impl Framebuffer {
-    pub fn new(width: u32, height: u32, fmt: PixelFormat) -> Self {
-        let n = (width * height) as usize;
-        let mut buf = Vec::with_capacity(n);
+    /// Allocates a zero-filled, tightly packed `width * height` back-buffer.
+    ///
+    /// Returns an error rather than wrapping the pixel count or aborting during
+    /// the initial capacity reservation.
+    pub fn new(width: u32, height: u32, fmt: PixelFormat) -> Result<Self, FramebufferError> {
+        let width_usize = usize::try_from(width)
+            .map_err(|_| FramebufferError::DimensionsOverflow)?;
+        let height_usize = usize::try_from(height)
+            .map_err(|_| FramebufferError::DimensionsOverflow)?;
+        let n = width_usize.checked_mul(height_usize)
+            .ok_or(FramebufferError::DimensionsOverflow)?;
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(n).map_err(|_| FramebufferError::AllocationFailed)?;
         buf.resize(n, 0);
-        Self { buf, width, height, fmt }
+        Ok(Self { buf, width, height, fmt })
     }
+
+    /// Returns the visible width in pixels.
+    #[inline]
+    pub const fn width(&self) -> u32 { self.width }
+
+    /// Returns the visible height in pixels.
+    #[inline]
+    pub const fn height(&self) -> u32 { self.height }
+
+    /// Returns the packed pixels in row-major order with no row padding.
+    #[inline]
+    pub fn pixels(&self) -> &[u32] { &self.buf }
+
+    /// Returns mutable packed pixels without allowing the buffer to be resized.
+    #[inline]
+    pub fn pixels_mut(&mut self) -> &mut [u32] { &mut self.buf }
 
     // -----------------------------------------------------------------------
     // Pixel encoding
     // -----------------------------------------------------------------------
 
-    /// RGB → GOP-native u32.
+    /// Packs RGB into GOP's native `u32` byte order.
+    ///
+    /// [`PixelFormat::Rgb`] receives the RGB branch; every other variant uses
+    /// the BGR branch, including `Bitmask` and `BltOnly`.
     #[inline]
     pub fn pack(&self, c: Color) -> u32 {
         match self.fmt {
@@ -84,7 +149,7 @@ impl Framebuffer {
         }
     }
 
-    /// GOP-native u32 → RGB.
+    /// Unpacks a GOP-native `u32` using the same format rule as [`Self::pack`].
     #[inline]
     pub fn unpack(&self, p: u32) -> Color {
         match self.fmt {
@@ -98,6 +163,7 @@ impl Framebuffer {
     // -----------------------------------------------------------------------
 
     #[inline]
+    /// Writes a packed pixel, ignoring coordinates outside the back-buffer.
     pub fn set(&mut self, x: u32, y: u32, p: u32) {
         if x < self.width && y < self.height {
             self.buf[(y * self.width + x) as usize] = p;
@@ -105,12 +171,15 @@ impl Framebuffer {
     }
 
     #[inline]
+    /// Signed-coordinate form of [`Self::set`].
     pub fn set_i(&mut self, x: i32, y: i32, p: u32) {
         if x >= 0 && y >= 0 { self.set(x as u32, y as u32, p); }
     }
 
-    /// Alpha-blend `fg` over the existing pixel at (x, y).
-    /// `coverage` 0 = transparent, 255 = opaque.
+    /// Alpha-blends `fg` over the existing pixel at `(x, y)`.
+    ///
+    /// Coverage 0 is transparent and 255 is opaque. Out-of-bounds writes are
+    /// ignored.
     #[inline]
     pub fn blend_pixel(&mut self, x: u32, y: u32, fg: Color, coverage: u8) {
         if x >= self.width || y >= self.height || coverage == 0 { return; }
@@ -132,6 +201,7 @@ impl Framebuffer {
     // Fills and outlines
     // -----------------------------------------------------------------------
 
+    /// Fills the portion of a signed rectangle that intersects the back-buffer.
     pub fn fill(&mut self, x: i32, y: i32, w: u32, h: u32, p: u32) {
         let x0 = x.max(0) as u32;
         let y0 = y.max(0) as u32;
@@ -148,6 +218,7 @@ impl Framebuffer {
         }
     }
 
+    /// Draws a one-pixel outline using four clipped fills.
     pub fn rect_outline(&mut self, x: i32, y: i32, w: u32, h: u32, p: u32) {
         self.fill(x,                y,                w, 1, p);
         self.fill(x,                y + h as i32 - 1, w, 1, p);
@@ -159,6 +230,7 @@ impl Framebuffer {
     // Gradient
     // -----------------------------------------------------------------------
 
+    /// Fills a horizontal gradient from `left` to `right`.
     pub fn gradient_h(&mut self, x: i32, y: i32, w: u32, h: u32,
                       left: Color, right: Color) {
         for col in 0..w {
@@ -172,6 +244,7 @@ impl Framebuffer {
     // 3-D borders
     // -----------------------------------------------------------------------
 
+    /// Draws the toolkit's two-pixel raised border.
     pub fn border_raised(&mut self, x: i32, y: i32, w: u32, h: u32) {
         let fr = self.pack(Color::FRAME);
         let hi = self.pack(Color::HIGHLIGHT);
@@ -189,6 +262,7 @@ impl Framebuffer {
         }
     }
 
+    /// Draws the toolkit's two-pixel sunken border.
     pub fn border_sunken(&mut self, x: i32, y: i32, w: u32, h: u32) {
         let hi = self.pack(Color::HIGHLIGHT);
         let sh = self.pack(Color::SHADOW);
@@ -253,7 +327,7 @@ impl Framebuffer {
         x
     }
 
-    /// Pixel-width of a string (sum of rounded advance widths).
+    /// Pixel width of a string (sum of individually truncated advance widths).
     pub fn text_width(s: &str, font: &fontdue::Font, px: f32) -> i32 {
         s.chars()
             .map(|c| font.metrics(c, px).advance_width as i32)
@@ -289,19 +363,40 @@ impl Framebuffer {
     // Present
     // -----------------------------------------------------------------------
 
-    /// # Safety
-    /// `gop_ptr` must point to a valid GOP framebuffer; `gop_stride` is
-    /// pixels-per-scan-line as reported by GOP.
-    pub unsafe fn present_to(&self, gop_ptr: *mut u8, gop_stride: usize) {
-        for row in 0..self.height as usize {
-            let src_base = row * self.width as usize;
+    /// Copies the visible back-buffer into a GOP framebuffer row by row.
+    ///
+    /// `gop_stride` is pixels per scan line, so destination padding is skipped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `gop_stride` is smaller than the visible width, if the visible
+    /// rows do not fit in `gop_fb`, or if the size calculation overflows.
+    pub fn present_to(&self, gop_fb: &mut GopFrameBuffer<'_>, gop_stride: usize) {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        assert!(gop_stride >= width, "GOP stride is smaller than the visible width");
+
+        let required_pixels = if height == 0 {
+            0
+        } else {
+            (height - 1)
+                .checked_mul(gop_stride)
+                .and_then(|last_row| last_row.checked_add(width))
+                .expect("GOP framebuffer dimensions overflow")
+        };
+        let required_bytes = required_pixels.checked_mul(core::mem::size_of::<u32>())
+            .expect("GOP framebuffer byte size overflows");
+        assert!(required_bytes <= gop_fb.size(), "GOP framebuffer is too small");
+
+        for row in 0..height {
+            let src_base = row * width;
             let dst_base = row * gop_stride;
-            let dst = gop_ptr.add(dst_base * 4) as *mut u32;
-            core::ptr::copy_nonoverlapping(
-                self.buf.as_ptr().add(src_base),
-                dst,
-                self.width as usize,
-            );
+            for col in 0..width {
+                let offset = (dst_base + col) * core::mem::size_of::<u32>();
+                let bytes = self.buf[src_base + col].to_ne_bytes();
+                // The bounds, pixel layout, and stride were validated above.
+                unsafe { gop_fb.write_value(offset, bytes) };
+            }
         }
     }
 }

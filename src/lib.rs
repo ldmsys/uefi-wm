@@ -1,22 +1,25 @@
-//! `uefi-wm` — a no_std UEFI GUI toolkit.
+//! A `no_std` UEFI GUI toolkit.
 //!
 //! # Modules
 //! - [`gfx`] — software framebuffer and antialiased drawing primitives.
-//! - [`input`] — keyboard and mouse input drivers (UEFI protocols + PS/2 fallback).
+//! - [`input`] — keyboard and pointer input from UEFI protocols and direct PS/2 I/O.
 //! - [`wm`] — floating window manager with widgets (Windows 2000 visual style).
 //!
 //! # Minimal usage
-//! ```no_run
+//! ```ignore
 //! // Font bytes are provided by the caller so the library itself stays
 //! // font-agnostic.  Embed a TTF with include_bytes! in your application.
 //! static FONT: &[u8] = include_bytes!("path/to/font.ttf");
 //!
-//! let mut fb  = gfx::Framebuffer::new(width, height, pixel_format);
+//! let mut fb  = gfx::Framebuffer::new(width, height, pixel_format).unwrap();
 //! let mut wm  = wm::WindowManager::new(width, height, FONT, 16.0);
 //! let mut drv = input::InputDriver::new(width, height);
-//! // Build UI: wm.open() / wm.add_*() / wm.set_on_click() / wm.set_on_change(), then:
-//! wm.run(&mut fb, &mut drv, gop_ptr, gop_stride);
+//! // Build the UI, then enter the library-owned event loop.
+//! wm.run(&mut fb, &mut drv, gop.frame_buffer(), gop_stride);
 //! ```
+//!
+//! The scoped GOP protocol remains open while its [`uefi::proto::console::gop::FrameBuffer`]
+//! is consumed by the event loop. `gop_stride` is measured in pixels.
 
 #![no_std]
 #![deny(warnings)]

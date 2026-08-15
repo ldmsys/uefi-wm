@@ -26,18 +26,18 @@
 //! | Type | Setter | Fires when |
 //! |------|--------|------------|
 //! | `on_click` | [`WindowManager::set_on_click`] | Mouse released over the same button it was pressed on |
-//! | `on_change` | [`WindowManager::set_on_change`] | User changes a widget's value (TextBox, TextArea, CheckBox, RadioButton, ComboBox, ListBox, Slider, NumericUpDown) |
+//! | `on_change` | [`WindowManager::set_on_change`] | Input handling reports a mutation or activation for TextBox, TextArea, CheckBox, RadioButton, ComboBox, ListBox, Slider, or NumericUpDown |
 //!
-//! **Write accessors never fire `on_change`.**  Calling [`WindowManager::set_slider_value`],
-//! [`WindowManager::set_checkbox_checked`], etc. from code has no side-effects beyond
-//! updating the stored value.  Only direct user interaction triggers the callback.
+//! **Write accessors never fire `on_change`.** Some also update related cursor,
+//! selection, or scroll state as documented by the individual method. Only
+//! mutation/activation reports routed from input invoke the callback.
 //!
-//! [`WindowManager::event_source`] is `Some(`[`WidgetId`]`)` for the triggering widget
-//! while the callback runs, and `None` between calls.
+//! [`WindowManager::event_source`] is assigned before callback lookup and
+//! retains the most recently triggered widget after the callback returns.
 //!
 //! ## Quick example
 //!
-//! ```no_run
+//! ```ignore
 //! use uefi_wm::wm::{EventCtx, MsgBoxButtons, MsgBoxResult, WindowManager};
 //!
 //! // (wm: WindowManager already created)
@@ -101,15 +101,16 @@
 //! [`WindowManager::run`] is the standard entry point. For extra event sources,
 //! a variable frame rate, or per-frame application logic, drive the loop yourself:
 //!
-//! ```no_run
+//! ```ignore
 //! use uefi::boot::{self, EventType, TimerTrigger, Tpl};
-//! // fb: Framebuffer, wm: WindowManager, drv: InputDriver, gop_ptr, gop_stride already created.
+//! // fb: Framebuffer, wm: WindowManager, drv: InputDriver, gop, gop_stride already created.
+//! let mut gop_fb = gop.frame_buffer();
 //!
 //! let frame_timer = unsafe {
 //!     boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None).unwrap()
 //! };
 //! boot::set_timer(&frame_timer, TimerTrigger::Periodic(166_670)).unwrap();
-//! let timer_slot = drv.wait_events().len(); // keyboard is always slot 0
+//! let timer_slot = drv.wait_events().len(); // standard loop assumes keyboard is slot 0
 //!
 //! loop {
 //!     let mut wait_buf = drv.wait_events();
@@ -118,9 +119,9 @@
 //!
 //!     let events = if fired == 0 { drv.read_keys() } else { drv.read_ptr() };
 //!
-//!     if wm.handle(&events, &mut fb, &mut drv, gop_ptr, gop_stride) { break; }
+//!     if wm.handle(&events, &mut fb, &mut drv, &mut gop_fb, gop_stride) { break; }
 //!     wm.render(&mut fb);
-//!     unsafe { fb.present_to(gop_ptr, gop_stride) };
+//!     fb.present_to(&mut gop_fb, gop_stride);
 //! }
 //! ```
 
@@ -128,6 +129,7 @@ extern crate alloc;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use uefi::boot::{self, EventType, TimerTrigger, Tpl};
+use uefi::proto::console::gop::FrameBuffer as GopFrameBuffer;
 use uefi::proto::console::text::{Key, ScanCode};
 
 use crate::gfx::{Color, Framebuffer};
@@ -165,81 +167,95 @@ const FRAME_PERIOD_100NS: u64 = 166_670;
 // Public dialog types
 // ---------------------------------------------------------------------------
 
-pub enum MsgBoxButtons { Ok, YesNo }
+/// Button layout for [`WindowManager::message_box`].
+pub enum MsgBoxButtons {
+    /// A single OK button.
+    Ok,
+    /// Yes and No buttons.
+    YesNo,
+}
 
 #[derive(PartialEq)]
-pub enum MsgBoxResult { Ok, Yes, No }
+/// Result returned by [`WindowManager::message_box`].
+pub enum MsgBoxResult {
+    /// The OK button or Enter in an OK-only dialog.
+    Ok,
+    /// The Yes button or Enter in a Yes/No dialog.
+    Yes,
+    /// The No button, or Escape in either dialog layout.
+    No,
+}
 
 // ---------------------------------------------------------------------------
 // Widget callback type alias
 // ---------------------------------------------------------------------------
 
-type Cb = Box<dyn for<'ctx> FnMut(&mut WindowManager, &mut EventCtx<'ctx>)>;
+type Cb = Box<dyn for<'ctx, 'gop> FnMut(&mut WindowManager, &mut EventCtx<'ctx, 'gop>)>;
 
 // ---------------------------------------------------------------------------
 // Typed widget handles
 // ---------------------------------------------------------------------------
 
-/// Opaque handle to a `Label` widget; returned by [`WindowManager::add_label`].
+/// Typed global widget index for a label.
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct LabelId(pub usize);
-/// Opaque handle to a `TextBox` widget; returned by [`WindowManager::add_textbox`].
+/// Typed global widget index for a text box.
 ///
 /// Read value with [`WindowManager::textbox_text`]; write with [`WindowManager::set_textbox_text`];
 /// make read-only with [`WindowManager::set_textbox_readonly`];
 /// react to edits with [`WindowManager::set_on_change`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct TextBoxId(pub usize);
-/// Opaque handle to a `TextArea` widget; returned by [`WindowManager::add_textarea`].
+/// Typed global widget index for a text area.
 ///
 /// Read with [`WindowManager::textarea_text`]; write with [`WindowManager::set_textarea_text`]
 /// or [`WindowManager::append_textarea_text`]; scroll with [`WindowManager::textarea_scroll`] /
 /// [`WindowManager::set_textarea_scroll`]; make read-only with [`WindowManager::set_textarea_readonly`];
 /// react to edits with [`WindowManager::set_on_change`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct TextAreaId(pub usize);
-/// Opaque handle to a `CheckBox` widget; returned by [`WindowManager::add_checkbox`].
+/// Typed global widget index for a checkbox.
 ///
 /// Read with [`WindowManager::checkbox_checked`]; write with [`WindowManager::set_checkbox_checked`];
 /// react to toggles with [`WindowManager::set_on_change`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct CheckBoxId(pub usize);
-/// Opaque handle to a `RadioButton` widget; returned by [`WindowManager::add_radiobutton`].
+/// Typed global widget index for a radio button.
 ///
 /// Query the selected button in a group with [`WindowManager::radio_selected_in_group`].
 /// React to selection changes with [`WindowManager::set_on_change`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct RadioButtonId(pub usize);
-/// Opaque handle to a `ComboBox` widget; returned by [`WindowManager::add_combobox`].
+/// Typed global widget index for a combo box.
 ///
 /// Read selected index with [`WindowManager::combobox_selected`];
 /// write with [`WindowManager::set_combobox_selected`];
 /// react to selection changes with [`WindowManager::set_on_change`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct ComboBoxId(pub usize);
-/// Opaque handle to a `ListBox` widget; returned by [`WindowManager::add_listbox`].
+/// Typed global widget index for a list box.
 ///
 /// Read selected index with [`WindowManager::listbox_selected`];
 /// replace items with [`WindowManager::set_listbox_items`];
 /// react to selection changes with [`WindowManager::set_on_change`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct ListBoxId(pub usize);
-/// Opaque handle to a `Button` widget; returned by [`WindowManager::add_button`].
+/// Typed global widget index for a button.
 ///
 /// React to clicks with [`WindowManager::set_on_click`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct ButtonId(pub usize);
-/// Opaque handle to a `ProgressBar` widget; returned by [`WindowManager::add_progressbar`].
+/// Typed global widget index for a progress bar.
 ///
 /// Update with [`WindowManager::set_progressbar`]. Not interactive.
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct ProgressBarId(pub usize);
-/// Opaque handle to a `Slider` widget; returned by [`WindowManager::add_slider`].
+/// Typed global widget index for a slider.
 ///
 /// Read value with [`WindowManager::slider_value`]; write with [`WindowManager::set_slider_value`];
 /// react to drags and key presses with [`WindowManager::set_on_change`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct SliderId(pub usize);
-/// Opaque handle to a `NumericUpDown` widget; returned by [`WindowManager::add_numeric_updown`].
+/// Typed global widget index for a numeric up-down control.
 ///
 /// Read value with [`WindowManager::numeric_value`]; write with [`WindowManager::set_numeric_value`];
 /// change step size with [`WindowManager::set_numeric_step`];
 /// react to changes with [`WindowManager::set_on_change`].
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct NumericUpDownId(pub usize);
-/// Opaque handle to a `GroupBox` widget; returned by [`WindowManager::add_groupbox`].
+/// Typed global widget index for a group box.
 /// Decorative only — no value accessors.
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct GroupBoxId(pub usize);
-/// Opaque handle to a `Separator` widget; returned by [`WindowManager::add_separator`].
+/// Typed global widget index for a separator.
 /// Decorative only — no value accessors.
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct SeparatorId(pub usize);
 
@@ -250,18 +266,31 @@ type Cb = Box<dyn for<'ctx> FnMut(&mut WindowManager, &mut EventCtx<'ctx>)>;
 /// Every typed handle (`SliderId`, `ButtonId`, …) converts into `WidgetId` via `From`/`Into`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WidgetId {
+    /// Label handle.
     Label(LabelId),
+    /// Text-box handle.
     TextBox(TextBoxId),
+    /// Text-area handle.
     TextArea(TextAreaId),
+    /// Checkbox handle.
     CheckBox(CheckBoxId),
+    /// Radio-button handle.
     RadioButton(RadioButtonId),
+    /// Combo-box handle.
     ComboBox(ComboBoxId),
+    /// List-box handle.
     ListBox(ListBoxId),
+    /// Button handle.
     Button(ButtonId),
+    /// Progress-bar handle.
     ProgressBar(ProgressBarId),
+    /// Slider handle.
     Slider(SliderId),
+    /// Numeric up-down handle.
     NumericUpDown(NumericUpDownId),
+    /// Group-box handle.
     GroupBox(GroupBoxId),
+    /// Separator handle.
     Separator(SeparatorId),
 }
 
@@ -314,10 +343,10 @@ impl From<SeparatorId>     for WidgetId { fn from(id: SeparatorId)     -> Self {
 /// Use `ctx` to signal exit, draw onto the back-buffer, or force an immediate
 /// screen blit.  Use `wm` to read or write widget state, open new windows, or
 /// show a [`WindowManager::message_box`].
-pub struct EventCtx<'a> {
+pub struct EventCtx<'a, 'gop> {
     /// Set to `true` to stop [`WindowManager::run`] after this callback returns.
     ///
-    /// ```no_run
+    /// ```ignore
     /// |_wm: &mut WindowManager, ctx: &mut EventCtx| {
     ///     ctx.quit = true; // event loop exits after returning from this closure
     /// }
@@ -333,20 +362,21 @@ pub struct EventCtx<'a> {
     /// [`EventCtx::present`] immediately if you need the user to see the change
     /// before the next frame.
     pub fb:         &'a mut Framebuffer,
+    /// Input and GOP access remain private; use [`Self::present`] to blit.
     drv:            &'a mut InputDriver,
-    gop_ptr:        *mut u8,
+    gop_fb:         &'a mut GopFrameBuffer<'gop>,
     gop_stride:     usize,
 }
 
-impl EventCtx<'_> {
+impl EventCtx<'_, '_> {
     /// Blit the back-buffer to the GOP framebuffer immediately.
     ///
     /// [`WindowManager::run`] already calls this once per frame after
     /// [`WindowManager::render`].  Call `present()` inside a callback only when
     /// you need the user to see an interim state — for example, a "working…"
     /// overlay drawn to [`EventCtx::fb`] before a long-running operation starts.
-    pub fn present(&self) {
-        unsafe { self.fb.present_to(self.gop_ptr, self.gop_stride) }
+    pub fn present(&mut self) {
+        self.fb.present_to(self.gop_fb, self.gop_stride)
     }
 }
 
@@ -676,10 +706,13 @@ impl Window {
 // WindowManager
 // ---------------------------------------------------------------------------
 
+/// Owns the desktop's windows, widgets, focus, cursor, and font.
 pub struct WindowManager {
     windows:          Vec<Window>,
     next_id:          u32,
+    /// Current cursor X coordinate in screen pixels.
     pub cx:           i32,
+    /// Current cursor Y coordinate in screen pixels.
     pub cy:           i32,
     sw:               u32,
     sh:               u32,
@@ -692,13 +725,16 @@ pub struct WindowManager {
     /// (widget_idx, mouse_y_at_start, scroll_at_start)
     scroll_drag:      Option<(usize, i32, usize)>,
 
-    /// The handle of the widget that triggered the current callback, or `None`
-    /// between callbacks.
+    /// The most recently triggered widget, or `None` before the first trigger.
+    ///
+    /// The field is assigned before the manager looks up a callback. It remains
+    /// set after callback completion and can therefore be stale outside a
+    /// callback.
     ///
     /// For a single-widget callback, the simplest approach is to capture the
     /// typed handle directly in the closure — `event_source` is not needed:
     ///
-    /// ```no_run
+    /// ```ignore
     /// // slider: SliderId — captured from the enclosing scope
     /// wm.set_on_change(slider, Box::new(move |wm: &mut WindowManager, _: &mut EventCtx| {
     ///     let v = wm.slider_value(slider); // no need to consult event_source
@@ -709,7 +745,7 @@ pub struct WindowManager {
     /// When the same closure body is registered on several widgets, pattern-match
     /// `event_source` to identify the caller:
     ///
-    /// ```no_run
+    /// ```ignore
     /// // s1, s2: SliderId — both drive the same label
     /// let handler = move |wm: &mut WindowManager, _: &mut EventCtx| {
     ///     let id = match wm.event_source {
@@ -736,6 +772,14 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    /// Constructs an empty window manager and parses the caller-supplied font.
+    ///
+    /// The cursor starts at the center of the screen. `fontdue` copies the font
+    /// data, so `font_bytes` need not have a static lifetime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `font_bytes` is not a font accepted by `fontdue`.
     pub fn new(sw: u32, sh: u32, font_bytes: &[u8], font_px: f32) -> Self {
         let font = fontdue::Font::from_bytes(
             font_bytes, fontdue::FontSettings::default(),
@@ -824,6 +868,9 @@ impl WindowManager {
     // Window
     // -----------------------------------------------------------------------
 
+    /// Opens a visible, non-minimized window and returns its numeric ID.
+    ///
+    /// The title is copied. New windows are appended at the top of z-order.
     pub fn open(&mut self, title: &str, x: i32, y: i32, w: u32, h: u32) -> u32 {
         let id = self.next_id; self.next_id += 1;
         self.windows.push(Window {
@@ -837,6 +884,7 @@ impl WindowManager {
     // Widget constructors
     // -----------------------------------------------------------------------
 
+    /// Adds a mutable text label. A width of zero disables horizontal clipping.
     pub fn add_label(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                      width: u32, text: &str) -> LabelId {
         let idx = self.widgets.len();
@@ -846,6 +894,9 @@ impl WindowManager {
         LabelId(idx)
     }
 
+    /// Adds an empty single-line text box with a static label.
+    ///
+    /// The first text box added for a window may become the focused widget.
     pub fn add_textbox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                        width: u32, label: &'static str) -> TextBoxId {
         let idx = self.widgets.len();
@@ -861,6 +912,7 @@ impl WindowManager {
         TextBoxId(idx)
     }
 
+    /// Adds an empty multiline text area.
     pub fn add_textarea(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                         width: u32, height: u32) -> TextAreaId {
         let idx = self.widgets.len();
@@ -872,6 +924,7 @@ impl WindowManager {
         TextAreaId(idx)
     }
 
+    /// Adds an initially unchecked checkbox with a static label.
     pub fn add_checkbox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                         label: &'static str) -> CheckBoxId {
         let idx = self.widgets.len();
@@ -882,6 +935,9 @@ impl WindowManager {
         CheckBoxId(idx)
     }
 
+    /// Adds a radio button to a window-local group.
+    ///
+    /// The first button added to each `(win_id, group_id)` is selected.
     pub fn add_radiobutton(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                            label: &'static str, group_id: u32) -> RadioButtonId {
         let idx = self.widgets.len();
@@ -897,6 +953,9 @@ impl WindowManager {
         RadioButtonId(idx)
     }
 
+    /// Adds a combo box whose initial selected index is zero.
+    ///
+    /// The label and options are retained as static string references.
     pub fn add_combobox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                         width: u32, label: &'static str,
                         options: &[&'static str]) -> ComboBoxId {
@@ -910,6 +969,9 @@ impl WindowManager {
         ComboBoxId(idx)
     }
 
+    /// Adds a scrollable list box with no initial selection.
+    ///
+    /// Items are retained as static string references.
     pub fn add_listbox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                        width: u32, height: u32, items: &[&'static str]) -> ListBoxId {
         let idx = self.widgets.len();
@@ -922,6 +984,7 @@ impl WindowManager {
         ListBoxId(idx)
     }
 
+    /// Adds a push button with a static label.
     pub fn add_button(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                       width: u32, label: &'static str) -> ButtonId {
         let idx = self.widgets.len();
@@ -932,6 +995,7 @@ impl WindowManager {
         ButtonId(idx)
     }
 
+    /// Adds a noninteractive progress bar initialized to `0 / 100`.
     pub fn add_progressbar(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                            width: u32, label: &'static str) -> ProgressBarId {
         let idx = self.widgets.len();
@@ -942,6 +1006,11 @@ impl WindowManager {
         ProgressBarId(idx)
     }
 
+    /// Adds a horizontal integer slider and clamps `initial` to its range.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `min > max`.
     pub fn add_slider(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                       width: u32, label: &'static str,
                       min: i32, max: i32, initial: i32) -> SliderId {
@@ -954,6 +1023,13 @@ impl WindowManager {
         SliderId(idx)
     }
 
+    /// Adds an integer editor with up/down buttons and an initial step of one.
+    ///
+    /// `initial` is clamped to the inclusive range.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `min > max`.
     pub fn add_numeric_updown(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                               width: u32, label: &'static str,
                               min: i32, max: i32, initial: i32) -> NumericUpDownId {
@@ -966,6 +1042,7 @@ impl WindowManager {
         NumericUpDownId(idx)
     }
 
+    /// Adds a decorative labeled group border.
     pub fn add_groupbox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                         width: u32, height: u32, label: &'static str) -> GroupBoxId {
         let idx = self.widgets.len();
@@ -975,6 +1052,7 @@ impl WindowManager {
         GroupBoxId(idx)
     }
 
+    /// Adds a decorative two-pixel horizontal separator.
     pub fn add_separator(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                          width: u32) -> SeparatorId {
         let idx = self.widgets.len();
@@ -1001,7 +1079,7 @@ impl WindowManager {
     ///
     /// # Example — exit after a confirmation dialog
     ///
-    /// ```no_run
+    /// ```ignore
     /// use uefi_wm::wm::{EventCtx, MsgBoxButtons, MsgBoxResult, WindowManager};
     ///
     /// let win    = wm.open("App", 100, 80, 400, 300);
@@ -1017,7 +1095,7 @@ impl WindowManager {
     ///
     /// # Example — open a second window on click
     ///
-    /// ```no_run
+    /// ```ignore
     /// use uefi_wm::wm::{EventCtx, WindowManager};
     ///
     /// let win  = wm.open("Main", 100, 80, 400, 300);
@@ -1029,7 +1107,8 @@ impl WindowManager {
     /// }));
     /// ```
     pub fn set_on_click(&mut self, id: ButtonId,
-                        cb: Box<dyn for<'ctx> FnMut(&mut WindowManager, &mut EventCtx<'ctx>)>) {
+                        cb: Box<dyn for<'ctx, 'gop> FnMut(
+                            &mut WindowManager, &mut EventCtx<'ctx, 'gop>)>) {
         if let Some(Widget::Button(b)) = self.widgets.get_mut(id.0) {
             b.on_click = Some(cb);
         }
@@ -1037,10 +1116,12 @@ impl WindowManager {
 
     /// Attach a value-change callback to any interactive widget.
     ///
-    /// The closure fires whenever the user changes the widget's value — by typing,
-    /// clicking, dragging, or using the arrow keys.  It does **not** fire when the
-    /// value is changed programmatically (e.g. [`WindowManager::set_slider_value`],
-    /// [`WindowManager::set_checkbox_checked`]).
+    /// The closure fires when input handling reports a mutation or activation by
+    /// typing, clicking, dragging, or using arrow keys. Most controls report only
+    /// actual value changes. Radio-button selection reports even when the selected
+    /// button was already selected, and committing a successfully parsed numeric
+    /// edit reports even when the clamped value is unchanged. Programmatic setters
+    /// such as [`WindowManager::set_slider_value`] never fire it.
     ///
     /// Accepted widget types: [`TextBoxId`], [`TextAreaId`], [`CheckBoxId`],
     /// [`RadioButtonId`], [`ComboBoxId`], [`ListBoxId`], [`SliderId`],
@@ -1052,7 +1133,7 @@ impl WindowManager {
     /// The most common pattern: capture the typed handles in a `move` closure so
     /// you never need to inspect [`WindowManager::event_source`].
     ///
-    /// ```no_run
+    /// ```ignore
     /// use uefi_wm::wm::{EventCtx, WindowManager};
     ///
     /// let win    = wm.open("Audio", 100, 80, 400, 300);
@@ -1067,7 +1148,7 @@ impl WindowManager {
     ///
     /// # Example — checkbox enabling another widget
     ///
-    /// ```no_run
+    /// ```ignore
     /// use uefi_wm::wm::{EventCtx, WindowManager};
     ///
     /// let win     = wm.open("Network", 100, 80, 400, 300);
@@ -1082,7 +1163,7 @@ impl WindowManager {
     ///
     /// # Example — combo box switching visible panels
     ///
-    /// ```no_run
+    /// ```ignore
     /// use uefi_wm::wm::{EventCtx, WindowManager};
     ///
     /// let win   = wm.open("Settings", 100, 80, 500, 400);
@@ -1104,7 +1185,7 @@ impl WindowManager {
     /// separate `Box::new(…)` per call (closures cannot be cloned) and match on
     /// [`WindowManager::event_source`] inside:
     ///
-    /// ```no_run
+    /// ```ignore
     /// use uefi_wm::wm::{EventCtx, WidgetId, WindowManager};
     ///
     /// let win = wm.open("Color", 100, 80, 400, 300);
@@ -1126,7 +1207,8 @@ impl WindowManager {
     /// }
     /// ```
     pub fn set_on_change(&mut self, id: impl Into<WidgetId>,
-                         cb: Box<dyn for<'ctx> FnMut(&mut WindowManager, &mut EventCtx<'ctx>)>) {
+                         cb: Box<dyn for<'ctx, 'gop> FnMut(
+                             &mut WindowManager, &mut EventCtx<'ctx, 'gop>)>) {
         let idx = id.into().idx();
         match self.widgets.get_mut(idx) {
             Some(Widget::TextBox(w))       => w.on_change = Some(cb),
@@ -1145,18 +1227,21 @@ impl WindowManager {
     // State accessors
     // -----------------------------------------------------------------------
 
+    /// Replaces a label's owned text.
     pub fn label_set_text(&mut self, id: LabelId, text: &str) {
         if let Some(Widget::Label(w)) = self.widgets.get_mut(id.0) {
             w.text.clear(); w.text.push_str(text);
         }
     }
 
+    /// Returns a text box's contents, or `""` for a wrong or stale handle.
     pub fn textbox_text(&self, id: TextBoxId) -> &str {
         match self.widgets.get(id.0) {
             Some(Widget::TextBox(w)) => &w.text, _ => "",
         }
     }
 
+    /// Replaces a text box's contents and moves its cursor to the end.
     pub fn set_textbox_text(&mut self, id: TextBoxId, text: &str) {
         if let Some(Widget::TextBox(w)) = self.widgets.get_mut(id.0) {
             w.text.clear(); w.text.push_str(text);
@@ -1164,12 +1249,14 @@ impl WindowManager {
         }
     }
 
+    /// Returns a text area's contents, or `""` for a wrong or stale handle.
     pub fn textarea_text(&self, id: TextAreaId) -> &str {
         match self.widgets.get(id.0) {
             Some(Widget::TextArea(w)) => &w.text, _ => "",
         }
     }
 
+    /// Replaces a text area's contents and resets its cursor and scroll to zero.
     pub fn set_textarea_text(&mut self, id: TextAreaId, text: &str) {
         if let Some(Widget::TextArea(w)) = self.widgets.get_mut(id.0) {
             w.text.clear(); w.text.push_str(text);
@@ -1177,8 +1264,7 @@ impl WindowManager {
         }
     }
 
-    /// Append `text` to the existing content and scroll to the bottom.
-    /// Suitable for log / IRC-style displays where new lines arrive continuously.
+    /// Appends `text`, moves the cursor to the end, and scrolls to the bottom.
     pub fn append_textarea_text(&mut self, id: TextAreaId, text: &str) {
         let lh = self.line_h();
         if let Some(Widget::TextArea(w)) = self.widgets.get_mut(id.0) {
@@ -1190,14 +1276,16 @@ impl WindowManager {
         }
     }
 
-    /// Read the current first-visible-line index of a `TextArea`.
+    /// Returns the first visible logical line, or zero for an invalid handle.
     pub fn textarea_scroll(&self, id: TextAreaId) -> usize {
         match self.widgets.get(id.0) {
             Some(Widget::TextArea(w)) => w.scroll_y, _ => 0,
         }
     }
 
-    /// Scroll a `TextArea` to `line` (0 = top). Clamped to valid range.
+    /// Sets the first visible logical line, clamped to the final line.
+    ///
+    /// This clamps to the content rather than to the last full viewport.
     pub fn set_textarea_scroll(&mut self, id: TextAreaId, line: usize) {
         if let Some(Widget::TextArea(w)) = self.widgets.get_mut(id.0) {
             let n_lines = w.text.split('\n').count();
@@ -1205,32 +1293,40 @@ impl WindowManager {
         }
     }
 
+    /// Returns whether a checkbox is checked, or `false` for an invalid handle.
     pub fn checkbox_checked(&self, id: CheckBoxId) -> bool {
         matches!(self.widgets.get(id.0), Some(Widget::CheckBox(w)) if w.checked)
     }
 
+    /// Sets a checkbox without firing its change callback.
     pub fn set_checkbox_checked(&mut self, id: CheckBoxId, checked: bool) {
         if let Some(Widget::CheckBox(w)) = self.widgets.get_mut(id.0) { w.checked = checked; }
     }
 
+    /// Returns a combo box's selected index, or zero for an invalid handle.
     pub fn combobox_selected(&self, id: ComboBoxId) -> usize {
         match self.widgets.get(id.0) {
             Some(Widget::ComboBox(w)) => w.selected, _ => 0,
         }
     }
 
+    /// Selects an index, clamped to the final option.
+    ///
+    /// An empty option list stores index zero. No change callback is fired.
     pub fn set_combobox_selected(&mut self, id: ComboBoxId, sel: usize) {
         if let Some(Widget::ComboBox(w)) = self.widgets.get_mut(id.0) {
             w.selected = sel.min(w.options.len().saturating_sub(1));
         }
     }
 
+    /// Returns a list box's selected index, or `None` if unset or invalid.
     pub fn listbox_selected(&self, id: ListBoxId) -> Option<usize> {
         match self.widgets.get(id.0) {
             Some(Widget::ListBox(w)) => w.selected, _ => None,
         }
     }
 
+    /// Replaces static list items, clears selection, and resets scrolling.
     pub fn set_listbox_items(&mut self, id: ListBoxId, items: &[&'static str]) {
         if let Some(Widget::ListBox(w)) = self.widgets.get_mut(id.0) {
             w.items = items.iter().copied().collect();
@@ -1247,43 +1343,56 @@ impl WindowManager {
         }).map(RadioButtonId)
     }
 
+    /// Returns a slider's value, or zero for an invalid handle.
     pub fn slider_value(&self, id: SliderId) -> i32 {
         match self.widgets.get(id.0) {
             Some(Widget::Slider(w)) => w.value, _ => 0,
         }
     }
 
+    /// Sets and range-clamps a slider without firing its change callback.
     pub fn set_slider_value(&mut self, id: SliderId, val: i32) {
         if let Some(Widget::Slider(w)) = self.widgets.get_mut(id.0) {
             w.value = val.clamp(w.min, w.max);
         }
     }
 
+    /// Stores `min(value, max)` and the supplied maximum.
+    ///
+    /// A maximum of zero is accepted. No change callback is fired.
     pub fn set_progressbar(&mut self, id: ProgressBarId, value: u32, max: u32) {
         if let Some(Widget::ProgressBar(w)) = self.widgets.get_mut(id.0) {
             w.value = value.min(max); w.max = max;
         }
     }
 
+    /// Returns a numeric up-down value, or zero for an invalid handle.
     pub fn numeric_value(&self, id: NumericUpDownId) -> i32 {
         match self.widgets.get(id.0) {
             Some(Widget::NumericUpDown(w)) => w.value, _ => 0,
         }
     }
 
+    /// Sets and range-clamps a numeric value without firing its callback.
     pub fn set_numeric_value(&mut self, id: NumericUpDownId, val: i32) {
         if let Some(Widget::NumericUpDown(w)) = self.widgets.get_mut(id.0) {
             w.value = val.clamp(w.min, w.max);
         }
     }
 
+    /// Sets the increment step, clamping it to at least one.
     pub fn set_numeric_step(&mut self, id: NumericUpDownId, step: i32) {
         if let Some(Widget::NumericUpDown(w)) = self.widgets.get_mut(id.0) {
             w.step = step.max(1);
         }
     }
 
-    /// Grey out / restore an interactive widget. Accepts any typed handle via `Into<WidgetId>`.
+    /// Sets the enabled flag on an interactive widget.
+    ///
+    /// Disabled widgets are grayed, skipped by hit testing, and skipped by focus
+    /// cycling. This method does not clear existing focus; keyboard routing for
+    /// an already-focused widget does not consistently consult the enabled flag.
+    /// Decorative widget handles are accepted but ignored.
     pub fn widget_set_enabled(&mut self, id: impl Into<WidgetId>, enabled: bool) {
         let idx = id.into().idx();
         match self.widgets.get_mut(idx) {
@@ -1300,23 +1409,25 @@ impl WindowManager {
         }
     }
 
-    /// Prevent editing without greying out. Unlike `widget_set_enabled`, the widget
-    /// keeps its normal appearance and can still receive focus and scroll.
+    /// Prevents text edits without changing appearance or focusability.
+    ///
+    /// Cursor-navigation keys continue to work.
     pub fn set_textbox_readonly(&mut self, id: TextBoxId, read_only: bool) {
         if let Some(Widget::TextBox(w)) = self.widgets.get_mut(id.0) {
             w.read_only = read_only;
         }
     }
 
-    /// Prevent editing without greying out. Unlike `widget_set_enabled`, the widget
-    /// keeps its normal appearance and can still receive focus and scroll.
+    /// Prevents text edits without changing appearance or focusability.
+    ///
+    /// Cursor navigation and scrolling continue to work.
     pub fn set_textarea_readonly(&mut self, id: TextAreaId, read_only: bool) {
         if let Some(Widget::TextArea(w)) = self.widgets.get_mut(id.0) {
             w.read_only = read_only;
         }
     }
 
-    /// Show or hide any widget. Accepts any typed handle via `Into<WidgetId>`.
+    /// Shows or hides any widget type.
     pub fn widget_set_visible(&mut self, id: impl Into<WidgetId>, visible: bool) {
         let idx = id.into().idx();
         match self.widgets.get_mut(idx) {
@@ -1341,15 +1452,21 @@ impl WindowManager {
     // Event loop
     // -----------------------------------------------------------------------
 
-    /// Drive the event loop until the user closes the last window or a callback sets `ctx.quit`.
+    /// Drives the standard event loop until input or a callback requests exit.
     ///
-    /// Creates a 60 Hz frame timer internally, polls input via [`InputDriver`], and calls
+    /// Creates an approximately 60 Hz timer, polls input via [`InputDriver`], and calls
     /// [`WindowManager::handle`] then [`WindowManager::render`] each tick. Blocks until exit.
+    /// Escape always exits. `q` or `Q` exits only when no widget is focused, and
+    /// a callback can exit by setting [`EventCtx::quit`]. Closing the final
+    /// visible window does not end the loop.
+    ///
+    /// Consumes `gop_fb`, keeping its borrow of the scoped GOP protocol valid
+    /// for the entire loop. `gop_stride` is measured in pixels.
     ///
     /// For custom event sources or per-frame logic, see the module-level *Custom event loop*
     /// example and call [`WindowManager::handle`] / [`WindowManager::render`] yourself.
     pub fn run(&mut self, fb: &mut Framebuffer, drv: &mut InputDriver,
-               gop_ptr: *mut u8, gop_stride: usize) {
+               mut gop_fb: GopFrameBuffer<'_>, gop_stride: usize) {
         let frame_timer = unsafe {
             boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None)
                 .expect("Cannot create timer event")
@@ -1370,45 +1487,49 @@ impl WindowManager {
                 drv.read_ptr()
             };
 
-            if self.handle(&events, fb, drv, gop_ptr, gop_stride) { break; }
+            if self.handle(&events, fb, drv, &mut gop_fb, gop_stride) { break; }
 
             self.render(fb);
-            unsafe { fb.present_to(gop_ptr, gop_stride) };
+            fb.present_to(&mut gop_fb, gop_stride);
         }
     }
 
-    /// Process one batch of input events; returns `true` when the app should exit.
+    /// Processes one batch of input events and reports whether the app should exit.
     ///
     /// Call once per frame after [`InputDriver::read_keys`] or [`InputDriver::read_ptr`].
-    /// See the module-level *Custom event loop* example for a complete self-contained loop.
+    /// Right-button events are ignored. The GOP framebuffer and stride are retained
+    /// only in callback contexts, where [`EventCtx::present`] or
+    /// [`WindowManager::message_box`] may use them.
+    ///
+    /// See the module-level *Custom event loop* example for the dispatch pattern.
     pub fn handle(&mut self, events: &[InputEvent], fb: &mut Framebuffer,
-                  drv: &mut InputDriver, gop_ptr: *mut u8, gop_stride: usize) -> bool {
+                  drv: &mut InputDriver, gop_fb: &mut GopFrameBuffer<'_>, gop_stride: usize) -> bool {
         for ev in events {
             match ev {
                 InputEvent::MouseMove { dx, dy } => {
                     self.cx = (self.cx + (*dx * PTR_SCALE) as i32).clamp(0, self.sw as i32 - 1);
                     self.cy = (self.cy + (*dy * PTR_SCALE) as i32).clamp(0, self.sh as i32 - 1);
                     if let Some(idx) = self.update_drag() {
-                        if self.fire_on_change(idx, fb, drv, gop_ptr, gop_stride) { return true; }
+                        if self.fire_on_change(idx, fb, drv, gop_fb, gop_stride) { return true; }
                     }
                 }
                 InputEvent::MouseAbs { x, y } => {
                     self.cx = (*x).clamp(0, self.sw as i32 - 1);
                     self.cy = (*y).clamp(0, self.sh as i32 - 1);
                     if let Some(idx) = self.update_drag() {
-                        if self.fire_on_change(idx, fb, drv, gop_ptr, gop_stride) { return true; }
+                        if self.fire_on_change(idx, fb, drv, gop_fb, gop_stride) { return true; }
                     }
                 }
                 InputEvent::LeftButton(true) => {
                     self.lbtn = true;
                     let prev_focus = self.focused_widget;
                     if let Some(idx) = self.on_press() {
-                        if self.fire_on_change(idx, fb, drv, gop_ptr, gop_stride) { return true; }
+                        if self.fire_on_change(idx, fb, drv, gop_fb, gop_stride) { return true; }
                     }
                     // If clicking elsewhere moved focus away from a NUD in edit mode, commit it.
                     if let Some(old) = prev_focus {
                         if self.focused_widget != prev_focus && self.commit_nud_edit(old) {
-                            if self.fire_on_change(old, fb, drv, gop_ptr, gop_stride) { return true; }
+                            if self.fire_on_change(old, fb, drv, gop_fb, gop_stride) { return true; }
                         }
                     }
                 }
@@ -1422,7 +1543,7 @@ impl WindowManager {
                     }
                     if let Some(armed) = self.armed_btn.take() {
                         if self.is_over_button(armed) {
-                            if self.fire_btn_click(armed, fb, drv, gop_ptr, gop_stride) {
+                            if self.fire_btn_click(armed, fb, drv, gop_fb, gop_stride) {
                                 return true;
                             }
                         }
@@ -1431,7 +1552,7 @@ impl WindowManager {
                 InputEvent::Key(k) => {
                     let (cont, changed) = self.route_key(k);
                     if let Some(idx) = changed {
-                        if self.fire_on_change(idx, fb, drv, gop_ptr, gop_stride) { return true; }
+                        if self.fire_on_change(idx, fb, drv, gop_fb, gop_stride) { return true; }
                     }
                     if !cont { return true; }
                 }
@@ -1441,17 +1562,19 @@ impl WindowManager {
         false
     }
 
-    /// Display a modal dialog and block until the user clicks a button.
+    /// Displays a modal dialog and blocks until mouse or keyboard dismissal.
     ///
     /// Can only be called from inside a callback (it requires `&mut EventCtx`).
-    /// The dialog runs its own mini event loop — mouse and keyboard work normally,
-    /// the rest of the UI is frozen until the user dismisses it.
+    /// The dialog busy-polls keyboard and all pointer sources while the rest of
+    /// the UI is frozen. A button returns on left-button press; Enter chooses
+    /// OK/Yes, and Escape returns [`MsgBoxResult::No`] for either layout.
     ///
-    /// `title` and `text` must be `'static` string literals.
+    /// `title` and `text` must have static lifetimes. The fixed 360 × 140 dialog
+    /// draws `text` as one unwrapped line.
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// use uefi_wm::wm::{EventCtx, MsgBoxButtons, MsgBoxResult, WindowManager};
     ///
     /// // Inside an on_click or on_change callback:
@@ -1468,9 +1591,9 @@ impl WindowManager {
                        title: &'static str, text: &'static str,
                        buttons: MsgBoxButtons) -> MsgBoxResult {
         self.render_base(ctx.fb);
-        let background = ctx.fb.buf.clone();
+        let background = ctx.fb.pixels().to_vec();
         msgbox_loop(
-            &background, ctx.fb, ctx.drv, ctx.gop_ptr, ctx.gop_stride,
+            &background, ctx.fb, ctx.drv, ctx.gop_fb, ctx.gop_stride,
             &self.font, self.ascent, self.font_px,
             title, text, &buttons, self.sw, self.sh,
             &mut self.cx, &mut self.cy,
@@ -1515,11 +1638,11 @@ impl WindowManager {
     }
 
     fn fire_on_change(&mut self, idx: usize, fb: &mut Framebuffer,
-                      drv: &mut InputDriver, gop_ptr: *mut u8, gop_stride: usize) -> bool {
+                      drv: &mut InputDriver, gop_fb: &mut GopFrameBuffer<'_>, gop_stride: usize) -> bool {
         self.event_source = self.widget_id_for(idx);
         let cb = self.take_on_change(idx);
         let Some(mut cb) = cb else { return false };
-        let mut ctx = EventCtx { quit: false, fb, drv, gop_ptr, gop_stride };
+        let mut ctx = EventCtx { quit: false, fb, drv, gop_fb, gop_stride };
         cb(self, &mut ctx);
         let quit = ctx.quit;
         self.put_on_change(idx, cb);
@@ -1555,13 +1678,13 @@ impl WindowManager {
     }
 
     fn fire_btn_click(&mut self, idx: usize, fb: &mut Framebuffer,
-                      drv: &mut InputDriver, gop_ptr: *mut u8, gop_stride: usize) -> bool {
+                      drv: &mut InputDriver, gop_fb: &mut GopFrameBuffer<'_>, gop_stride: usize) -> bool {
         self.event_source = Some(WidgetId::Button(ButtonId(idx)));
         let cb = if let Some(Widget::Button(b)) = self.widgets.get_mut(idx) {
             b.on_click.take()
         } else { None };
         let Some(mut cb) = cb else { return false };
-        let mut ctx = EventCtx { quit: false, fb, drv, gop_ptr, gop_stride };
+        let mut ctx = EventCtx { quit: false, fb, drv, gop_fb, gop_stride };
         cb(self, &mut ctx);
         let quit = ctx.quit;
         if let Some(Widget::Button(b)) = self.widgets.get_mut(idx) {
@@ -2335,7 +2458,7 @@ impl WindowManager {
     // Rendering
     // -----------------------------------------------------------------------
 
-    /// Draw all windows, widgets, and the cursor into `fb` (the back-buffer).
+    /// Draws the desktop, visible windows and widgets, and cursor into `fb`.
     ///
     /// Call once per frame after [`WindowManager::handle`]. Flush to the screen with
     /// [`Framebuffer::present_to`].
@@ -2345,7 +2468,7 @@ impl WindowManager {
     }
 
     fn render_base(&self, fb: &mut Framebuffer) {
-        fb.fill(0, 0, fb.width, fb.height, fb.pack(Color::DESKTOP));
+        fb.fill(0, 0, fb.width(), fb.height(), fb.pack(Color::DESKTOP));
 
         let wn = self.windows.len();
         for (i, win) in self.windows.iter().enumerate() {
@@ -2913,7 +3036,7 @@ impl WindowManager {
 #[allow(clippy::too_many_arguments)]
 fn msgbox_loop(
     background: &[u32], fb: &mut Framebuffer, drv: &mut InputDriver,
-    gop_ptr: *mut u8, gop_stride: usize,
+    gop_fb: &mut GopFrameBuffer<'_>, gop_stride: usize,
     font: &fontdue::Font, ascent: i32, font_px: f32,
     title: &'static str, text: &'static str, buttons: &MsgBoxButtons,
     sw: u32, sh: u32, cx: &mut i32, cy: &mut i32,
@@ -2966,10 +3089,10 @@ fn msgbox_loop(
             }
         }
 
-        fb.buf.copy_from_slice(background);
+        fb.pixels_mut().copy_from_slice(background);
         draw_msgbox_frame(fb, dlg_x, dlg_y, dw, dh, title, text, buttons, font, ascent, font_px);
         draw_cursor(fb, *cx, *cy);
-        unsafe { fb.present_to(gop_ptr, gop_stride) };
+        fb.present_to(gop_fb, gop_stride);
     }
 }
 
@@ -3066,7 +3189,7 @@ fn draw_cursor(fb: &mut Framebuffer, x: i32, y: i32) {
             let py = y + row_idx as i32;
 
             // Optional: Add a boundary check to prevent crashing at screen edges
-            // if px < 0 || py < 0 || px >= fb.width || py >= fb.height { continue; }
+            // if px < 0 || py < 0 || px >= fb.width() || py >= fb.height() { continue; }
 
             match char {
                 'B' => fb.set_i(px, py, black),
