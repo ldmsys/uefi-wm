@@ -17,6 +17,7 @@
 //! | NumericUpDown | [`NumericUpDownId`] | [`WindowManager::add_numeric_updown`] |
 //! | GroupBox | [`GroupBoxId`] | [`WindowManager::add_groupbox`] |
 //! | Separator | [`SeparatorId`] | [`WindowManager::add_separator`] |
+//! | QR Code | [`QrCodeId`] | [`WindowManager::add_qrcode`] |
 //!
 //! # Callback model
 //!
@@ -25,7 +26,7 @@
 //!
 //! | Type | Setter | Fires when |
 //! |------|--------|------------|
-//! | `on_click` | [`WindowManager::set_on_click`] | Mouse released over the same button it was pressed on |
+//! | `on_click` | [`WindowManager::set_on_click`] | Mouse released over the same widget it was pressed on |
 //! | `on_change` | [`WindowManager::set_on_change`] | Input handling reports a mutation or activation for TextBox, TextArea, CheckBox, RadioButton, ComboBox, ListBox, Slider, or NumericUpDown |
 //!
 //! **Write accessors never fire `on_change`.** Some also update related cursor,
@@ -72,7 +73,7 @@
 //! Every `add_*` constructor returns a typed handle (`SliderId`, `ButtonId`, …).
 //! Pass that handle to the matching accessor — the compiler rejects mismatched types.
 //! All typed handles also implement `Into<WidgetId>` for cross-widget operations
-//! (`set_on_change`, `widget_set_enabled`, `widget_set_visible`).
+//! (`set_on_click`, `set_on_change`, `widget_set_enabled`, `widget_set_visible`).
 //!
 //! # State accessors
 //!
@@ -90,7 +91,8 @@
 //! [`WindowManager::set_checkbox_checked`], [`WindowManager::set_combobox_selected`],
 //! [`WindowManager::set_listbox_items`], [`WindowManager::set_slider_value`],
 //! [`WindowManager::set_progressbar`],
-//! [`WindowManager::set_numeric_value`], [`WindowManager::set_numeric_step`].
+//! [`WindowManager::set_numeric_value`], [`WindowManager::set_numeric_step`],
+//! [`WindowManager::set_qrcode_data`].
 //!
 //! **Visibility / interactivity**:
 //! [`WindowManager::widget_set_enabled`], [`WindowManager::widget_set_visible`],
@@ -134,6 +136,7 @@ use uefi::proto::console::text::{Key, ScanCode};
 
 use crate::gfx::{Color, Framebuffer};
 use crate::input::{InputDriver, InputEvent};
+use crate::qr::{EncodeError as QrEncodeError, QrSymbol};
 
 // ---------------------------------------------------------------------------
 // Layout constants
@@ -395,11 +398,26 @@ type Cb = Box<dyn for<'ctx, 'gop> FnMut(&mut WindowManager, &mut EventCtx<'ctx, 
 /// Typed global widget index for a separator.
 /// Decorative only — no value accessors.
 #[derive(Clone, Copy, Debug, PartialEq)] pub struct SeparatorId(pub usize);
+/// Typed global widget index for a QR Code.
+///
+/// Read its UTF-8 payload with [`WindowManager::qrcode_data`] and replace it
+/// with [`WindowManager::set_qrcode_data`]. The widget is decorative.
+#[derive(Clone, Copy, Debug, PartialEq)] pub struct QrCodeId(pub usize);
+
+/// Error returned when a QR Code widget cannot encode or display its payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QrCodeError {
+    /// The UTF-8 payload exceeds the version-10-L byte-mode capacity.
+    DataTooLong,
+    /// The requested square is smaller than the encoded symbol plus its quiet zone.
+    SizeTooSmall,
+}
 
 /// Type-erased widget handle.
 ///
 /// Used by [`WindowManager::widget_set_enabled`], [`WindowManager::widget_set_visible`],
-/// [`WindowManager::set_on_change`], and the [`WindowManager::event_source`] field.
+/// [`WindowManager::set_on_click`], [`WindowManager::set_on_change`], and the
+/// [`WindowManager::event_source`] field.
 /// Every typed handle (`SliderId`, `ButtonId`, …) converts into `WidgetId` via `From`/`Into`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WidgetId {
@@ -429,6 +447,8 @@ pub enum WidgetId {
     GroupBox(GroupBoxId),
     /// Separator handle.
     Separator(SeparatorId),
+    /// QR Code handle.
+    QrCode(QrCodeId),
 }
 
 impl WidgetId {
@@ -447,6 +467,7 @@ impl WidgetId {
             WidgetId::NumericUpDown(id) => id.0,
             WidgetId::GroupBox(id)      => id.0,
             WidgetId::Separator(id)     => id.0,
+            WidgetId::QrCode(id)        => id.0,
         }
     }
 }
@@ -464,6 +485,7 @@ impl From<SliderId>        for WidgetId { fn from(id: SliderId)        -> Self {
 impl From<NumericUpDownId> for WidgetId { fn from(id: NumericUpDownId) -> Self { WidgetId::NumericUpDown(id) } }
 impl From<GroupBoxId>      for WidgetId { fn from(id: GroupBoxId)      -> Self { WidgetId::GroupBox(id) } }
 impl From<SeparatorId>     for WidgetId { fn from(id: SeparatorId)     -> Self { WidgetId::Separator(id) } }
+impl From<QrCodeId>        for WidgetId { fn from(id: QrCodeId)        -> Self { WidgetId::QrCode(id) } }
 
 // ---------------------------------------------------------------------------
 // EventCtx
@@ -619,7 +641,6 @@ struct Button {
     pressed:  bool,
     enabled:  bool,
     visible:  bool,
-    on_click: Option<Cb>,
 }
 
 struct ProgressBar {
@@ -681,6 +702,16 @@ struct Separator {
     visible: bool,
 }
 
+struct QrCode {
+    win_id:  u32,
+    rel_x:   i32,
+    rel_y:   i32,
+    size:    u32,
+    data:    String,
+    symbol:  QrSymbol,
+    visible: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Widget enum
 // ---------------------------------------------------------------------------
@@ -699,6 +730,7 @@ enum Widget {
     NumericUpDown(NumericUpDown),
     GroupBox(GroupBox),
     Separator(Separator),
+    QrCode(QrCode),
 }
 
 impl Widget {
@@ -717,6 +749,7 @@ impl Widget {
             Widget::NumericUpDown(w) => w.win_id,
             Widget::GroupBox(w)      => w.win_id,
             Widget::Separator(w)     => w.win_id,
+            Widget::QrCode(w)        => w.win_id,
         }
     }
 
@@ -735,6 +768,7 @@ impl Widget {
             Widget::NumericUpDown(w) => (w.rel_x, w.rel_y),
             Widget::GroupBox(w)      => (w.rel_x, w.rel_y),
             Widget::Separator(w)     => (w.rel_x, w.rel_y),
+            Widget::QrCode(w)        => (w.rel_x, w.rel_y),
         }
     }
 
@@ -764,6 +798,7 @@ impl Widget {
             Widget::NumericUpDown(w) => w.visible,
             Widget::GroupBox(w)      => w.visible,
             Widget::Separator(w)     => w.visible,
+            Widget::QrCode(w)        => w.visible,
         }
     }
 
@@ -859,8 +894,9 @@ pub struct WindowManager {
     theme:            Theme,
 
     widgets:          Vec<Widget>,
+    on_click:         Vec<Option<Cb>>,
     focused_widget:   Option<usize>,
-    armed_btn:        Option<usize>,
+    armed_widget:     Option<usize>,
     slider_drag:      Option<usize>,
     /// (widget_idx, mouse_y_at_start, scroll_at_start)
     scroll_drag:      Option<(usize, i32, usize)>,
@@ -939,8 +975,8 @@ impl WindowManager {
             windows: Vec::new(), next_id: 0,
             cx: sw as i32 / 2, cy: sh as i32 / 2,
             sw, sh, lbtn: false, theme,
-            widgets: Vec::new(), focused_widget: None,
-            armed_btn: None, slider_drag: None, scroll_drag: None, event_source: None,
+            widgets: Vec::new(), on_click: Vec::new(), focused_widget: None,
+            armed_widget: None, slider_drag: None, scroll_drag: None, event_source: None,
             font, ascent, font_px,
         }
     }
@@ -1041,11 +1077,16 @@ impl WindowManager {
     // Widget constructors
     // -----------------------------------------------------------------------
 
+    fn push_widget(&mut self, widget: Widget) {
+        self.widgets.push(widget);
+        self.on_click.push(None);
+    }
+
     /// Adds a mutable text label. A width of zero disables horizontal clipping.
     pub fn add_label(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                      width: u32, text: &str) -> LabelId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::Label(Label {
+        self.push_widget(Widget::Label(Label {
             win_id, rel_x, rel_y, width, text: String::from(text), visible: true,
         }));
         LabelId(idx)
@@ -1057,7 +1098,7 @@ impl WindowManager {
     pub fn add_textbox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                        width: u32, label: &'static str) -> TextBoxId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::TextBox(TextBox {
+        self.push_widget(Widget::TextBox(TextBox {
             win_id, rel_x, rel_y, width, label, text: String::new(), cursor: 0,
             enabled: true, read_only: false, visible: true, on_change: None,
         }));
@@ -1073,7 +1114,7 @@ impl WindowManager {
     pub fn add_textarea(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                         width: u32, height: u32) -> TextAreaId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::TextArea(TextArea {
+        self.push_widget(Widget::TextArea(TextArea {
             win_id, rel_x, rel_y, width, height,
             text: String::new(), cursor: 0, scroll_y: 0,
             enabled: true, read_only: false, visible: true, on_change: None,
@@ -1085,7 +1126,7 @@ impl WindowManager {
     pub fn add_checkbox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                         label: &'static str) -> CheckBoxId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::CheckBox(CheckBox {
+        self.push_widget(Widget::CheckBox(CheckBox {
             win_id, rel_x, rel_y, label, checked: false,
             enabled: true, visible: true, on_change: None,
         }));
@@ -1103,7 +1144,7 @@ impl WindowManager {
             w.win_id() == win_id
                 && matches!(w, Widget::RadioButton(r) if r.group_id == group_id)
         });
-        self.widgets.push(Widget::RadioButton(RadioButton {
+        self.push_widget(Widget::RadioButton(RadioButton {
             win_id, rel_x, rel_y, label, group_id,
             selected: is_first, enabled: true, visible: true, on_change: None,
         }));
@@ -1117,7 +1158,7 @@ impl WindowManager {
                         width: u32, label: &'static str,
                         options: &[&'static str]) -> ComboBoxId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::ComboBox(ComboBox {
+        self.push_widget(Widget::ComboBox(ComboBox {
             win_id, rel_x, rel_y, width, label,
             options: options.iter().copied().collect(),
             selected: 0, open: false,
@@ -1132,7 +1173,7 @@ impl WindowManager {
     pub fn add_listbox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                        width: u32, height: u32, items: &[&'static str]) -> ListBoxId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::ListBox(ListBox {
+        self.push_widget(Widget::ListBox(ListBox {
             win_id, rel_x, rel_y, width, height,
             items: items.iter().copied().collect(),
             selected: None, scroll: 0,
@@ -1145,9 +1186,9 @@ impl WindowManager {
     pub fn add_button(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                       width: u32, label: &'static str) -> ButtonId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::Button(Button {
+        self.push_widget(Widget::Button(Button {
             win_id, rel_x, rel_y, width, label, pressed: false,
-            enabled: true, visible: true, on_click: None,
+            enabled: true, visible: true,
         }));
         ButtonId(idx)
     }
@@ -1156,7 +1197,7 @@ impl WindowManager {
     pub fn add_progressbar(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                            width: u32, label: &'static str) -> ProgressBarId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::ProgressBar(ProgressBar {
+        self.push_widget(Widget::ProgressBar(ProgressBar {
             win_id, rel_x, rel_y, width, label,
             value: 0, max: 100, visible: true,
         }));
@@ -1172,7 +1213,7 @@ impl WindowManager {
                       width: u32, label: &'static str,
                       min: i32, max: i32, initial: i32) -> SliderId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::Slider(Slider {
+        self.push_widget(Widget::Slider(Slider {
             win_id, rel_x, rel_y, width, label,
             min, max, value: initial.clamp(min, max),
             enabled: true, visible: true, on_change: None,
@@ -1191,7 +1232,7 @@ impl WindowManager {
                               width: u32, label: &'static str,
                               min: i32, max: i32, initial: i32) -> NumericUpDownId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::NumericUpDown(NumericUpDown {
+        self.push_widget(Widget::NumericUpDown(NumericUpDown {
             win_id, rel_x, rel_y, width, label,
             value: initial.clamp(min, max), min, max, step: 1,
             enabled: true, visible: true, on_change: None, edit_buf: None,
@@ -1203,7 +1244,7 @@ impl WindowManager {
     pub fn add_groupbox(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                         width: u32, height: u32, label: &'static str) -> GroupBoxId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::GroupBox(GroupBox {
+        self.push_widget(Widget::GroupBox(GroupBox {
             win_id, rel_x, rel_y, width, height, label, visible: true,
         }));
         GroupBoxId(idx)
@@ -1213,21 +1254,50 @@ impl WindowManager {
     pub fn add_separator(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
                          width: u32) -> SeparatorId {
         let idx = self.widgets.len();
-        self.widgets.push(Widget::Separator(Separator {
+        self.push_widget(Widget::Separator(Separator {
             win_id, rel_x, rel_y, width, visible: true,
         }));
         SeparatorId(idx)
+    }
+
+    /// Adds a decorative QR Code containing `data` in UTF-8 byte mode.
+    ///
+    /// The encoder selects the smallest QR version from 1 through 10, uses Low
+    /// error correction, and includes the standard four-module quiet zone in
+    /// the requested square. `size` is the widget's width and height in pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QrCodeError::DataTooLong`] when the UTF-8 payload exceeds 271
+    /// bytes, or [`QrCodeError::SizeTooSmall`] when `size` cannot fit one pixel
+    /// per module plus the quiet zone.
+    pub fn add_qrcode(&mut self, win_id: u32, rel_x: i32, rel_y: i32,
+                      size: u32, data: &str) -> Result<QrCodeId, QrCodeError> {
+        let symbol = QrSymbol::encode(data.as_bytes()).map_err(|error| match error {
+            QrEncodeError::DataTooLong => QrCodeError::DataTooLong,
+        })?;
+        if symbol.size() + 8 > size as usize {
+            return Err(QrCodeError::SizeTooSmall);
+        }
+        let idx = self.widgets.len();
+        self.push_widget(Widget::QrCode(QrCode {
+            win_id, rel_x, rel_y, size, data: String::from(data), symbol, visible: true,
+        }));
+        Ok(QrCodeId(idx))
     }
 
     // -----------------------------------------------------------------------
     // Callback setters
     // -----------------------------------------------------------------------
 
-    /// Attach a click callback to a button widget.
+    /// Attach a click callback to any widget.
     ///
     /// The closure fires when the left mouse button is **released** over the same
-    /// button it was pressed on.  If the user presses and then drags off the button
+    /// widget it was pressed on. If the user presses and then drags off the widget
     /// before releasing, the click is cancelled and the callback does not fire.
+    /// The callback is available for every typed widget handle, including
+    /// decorative widgets such as labels, progress bars, and QR Codes. Disabled
+    /// interactive widgets do not receive clicks.
     ///
     /// Inside the callback you have full access to [`WindowManager`] — you can read
     /// and write widget state, open new windows, or show a modal
@@ -1263,11 +1333,13 @@ impl WindowManager {
     ///     wm.add_label(detail_win, 0, 0, 340, "Version 1.0 — built with uefi-wm.");
     /// }));
     /// ```
-    pub fn set_on_click(&mut self, id: ButtonId,
+    pub fn set_on_click(&mut self, id: impl Into<WidgetId>,
                         cb: Box<dyn for<'ctx, 'gop> FnMut(
                             &mut WindowManager, &mut EventCtx<'ctx, 'gop>)>) {
-        if let Some(Widget::Button(b)) = self.widgets.get_mut(id.0) {
-            b.on_click = Some(cb);
+        let id = id.into();
+        let idx = id.idx();
+        if self.widget_id_for(idx) == Some(id) {
+            self.on_click[idx] = Some(cb);
         }
     }
 
@@ -1389,6 +1461,37 @@ impl WindowManager {
         if let Some(Widget::Label(w)) = self.widgets.get_mut(id.0) {
             w.text.clear(); w.text.push_str(text);
         }
+    }
+
+    /// Returns a QR Code's UTF-8 payload, or `""` for a wrong or stale handle.
+    pub fn qrcode_data(&self, id: QrCodeId) -> &str {
+        match self.widgets.get(id.0) {
+            Some(Widget::QrCode(w)) => &w.data,
+            _ => "",
+        }
+    }
+
+    /// Re-encodes a QR Code with a new UTF-8 payload.
+    ///
+    /// The old payload and symbol remain unchanged if encoding fails or the
+    /// resulting symbol does not fit the widget's original square.
+    pub fn set_qrcode_data(&mut self, id: QrCodeId, data: &str) -> Result<(), QrCodeError> {
+        let size = match self.widgets.get(id.0) {
+            Some(Widget::QrCode(w)) => w.size,
+            _ => return Ok(()),
+        };
+        let symbol = QrSymbol::encode(data.as_bytes()).map_err(|error| match error {
+            QrEncodeError::DataTooLong => QrCodeError::DataTooLong,
+        })?;
+        if symbol.size() + 8 > size as usize {
+            return Err(QrCodeError::SizeTooSmall);
+        }
+        if let Some(Widget::QrCode(w)) = self.widgets.get_mut(id.0) {
+            w.data.clear();
+            w.data.push_str(data);
+            w.symbol = symbol;
+        }
+        Ok(())
     }
 
     /// Returns a text box's contents, or `""` for a wrong or stale handle.
@@ -1601,6 +1704,7 @@ impl WindowManager {
             Some(Widget::NumericUpDown(w)) => w.visible = visible,
             Some(Widget::GroupBox(w))      => w.visible = visible,
             Some(Widget::Separator(w))     => w.visible = visible,
+            Some(Widget::QrCode(w))        => w.visible = visible,
             None => {}
         }
     }
@@ -1679,6 +1783,7 @@ impl WindowManager {
                 }
                 InputEvent::LeftButton(true) => {
                     self.lbtn = true;
+                    self.armed_widget = None;
                     let prev_focus = self.focused_widget;
                     if let Some(idx) = self.on_press() {
                         if self.fire_on_change(idx, fb, drv, gop_fb, gop_stride) { return true; }
@@ -1698,9 +1803,9 @@ impl WindowManager {
                     for widget in &mut self.widgets {
                         if let Widget::Button(b) = widget { b.pressed = false; }
                     }
-                    if let Some(armed) = self.armed_btn.take() {
-                        if self.is_over_button(armed) {
-                            if self.fire_btn_click(armed, fb, drv, gop_fb, gop_stride) {
+                    if let Some(armed) = self.armed_widget.take() {
+                        if self.is_over_widget(armed) {
+                            if self.fire_on_click(armed, fb, drv, gop_fb, gop_stride) {
                                 return true;
                             }
                         }
@@ -1776,6 +1881,7 @@ impl WindowManager {
             Some(Widget::NumericUpDown(_)) => Some(WidgetId::NumericUpDown(NumericUpDownId(idx))),
             Some(Widget::GroupBox(_))      => Some(WidgetId::GroupBox(GroupBoxId(idx))),
             Some(Widget::Separator(_))     => Some(WidgetId::Separator(SeparatorId(idx))),
+            Some(Widget::QrCode(_))        => Some(WidgetId::QrCode(QrCodeId(idx))),
             None => None,
         }
     }
@@ -1834,18 +1940,16 @@ impl WindowManager {
         }
     }
 
-    fn fire_btn_click(&mut self, idx: usize, fb: &mut Framebuffer,
-                      drv: &mut InputDriver, gop_fb: &mut GopFrameBuffer<'_>, gop_stride: usize) -> bool {
-        self.event_source = Some(WidgetId::Button(ButtonId(idx)));
-        let cb = if let Some(Widget::Button(b)) = self.widgets.get_mut(idx) {
-            b.on_click.take()
-        } else { None };
+    fn fire_on_click(&mut self, idx: usize, fb: &mut Framebuffer,
+                     drv: &mut InputDriver, gop_fb: &mut GopFrameBuffer<'_>, gop_stride: usize) -> bool {
+        self.event_source = self.widget_id_for(idx);
+        let cb = self.on_click.get_mut(idx).and_then(Option::take);
         let Some(mut cb) = cb else { return false };
         let mut ctx = EventCtx { quit: false, fb, drv, gop_fb, gop_stride };
         cb(self, &mut ctx);
         let quit = ctx.quit;
-        if let Some(Widget::Button(b)) = self.widgets.get_mut(idx) {
-            b.on_click = Some(cb);
+        if let Some(slot) = self.on_click.get_mut(idx) {
+            *slot = Some(cb);
         }
         quit
     }
@@ -2307,6 +2411,7 @@ impl WindowManager {
                 let old = c.selected;
                 if let Some(item) = hit_item { c.selected = item; }
                 c.open = false;
+                if hit_item.is_some() { self.armed_widget = Some(i); }
                 return if hit_item.map_or(false, |item| item != old) { Some(i) } else { None };
             }
             return None;
@@ -2349,6 +2454,10 @@ impl WindowManager {
             }
         };
 
+        if let Some((i, _)) = &hit_widget {
+            self.armed_widget = Some(*i);
+        }
+
         match hit_widget {
             Some((i, WidgetHit::Focus)) => { self.focused_widget = Some(i); None }
             Some((i, WidgetHit::TextCursor(click_x, click_y))) => {
@@ -2376,7 +2485,6 @@ impl WindowManager {
             }
             Some((i, WidgetHit::Press)) => {
                 if let Widget::Button(b) = &mut self.widgets[i] { b.pressed = true; }
-                self.armed_btn = Some(i);
                 None
             }
             Some((i, WidgetHit::RadioSelect)) => {
@@ -2465,6 +2573,7 @@ impl WindowManager {
                 self.focused_widget = Some(i);
                 None
             }
+            Some((_i, WidgetHit::Click)) => None,
             None => {
                 self.focused_widget = self.widgets.iter().position(
                     |w| w.win_id() == win_id && matches!(w, Widget::TextBox(_))
@@ -2477,9 +2586,18 @@ impl WindowManager {
     fn widget_hit(&self, cx: i32, cy: i32, win_id: u32, ox: i32, oy: i32)
         -> Option<(usize, WidgetHit)>
     {
+        let mut passive_hit = None;
         for (i, widget) in self.widgets.iter().enumerate() {
             if widget.win_id() != win_id { continue; }
             if !widget.is_visible() || !widget.is_enabled() { continue; }
+            if self.point_over_widget(widget, cx, cy, ox, oy) {
+                passive_hit = Some((i, WidgetHit::Click));
+            }
+            if matches!(widget, Widget::Label(_) | Widget::ProgressBar(_)
+                | Widget::GroupBox(_) | Widget::Separator(_) | Widget::QrCode(_))
+            {
+                continue;
+            }
             let (rx, ry) = widget.rel_pos();
             match widget {
                 Widget::TextBox(tb) => {
@@ -2514,16 +2632,19 @@ impl WindowManager {
                     }
                     return Some((i, WidgetHit::TextCursor(cx, cy)));
                 }
-                Widget::CheckBox(_) => {
+                Widget::CheckBox(cb) => {
                     let bx = ox + rx; let by = oy + ry;
-                    if cx >= bx && cy >= by && cy < by + self.theme.metrics().checkbox_sz as i32 {
+                    let bw = self.theme.metrics().checkbox_sz as i32 + 5 + self.text_w(cb.label);
+                    if cx >= bx && cx < bx + bw
+                        && cy >= by && cy < by + self.theme.metrics().checkbox_sz as i32 {
                         return Some((i, WidgetHit::Toggle));
                     }
                 }
-                Widget::RadioButton(_) => {
+                Widget::RadioButton(rb) => {
                     let bx = ox + rx; let by = oy + ry;
                     let diam = RADIO_R * 2 + 2;
-                    if cx >= bx && cy >= by && cx < bx + diam + 60 && cy < by + diam {
+                    let bw = RADIO_R * 2 + 6 + self.text_w(rb.label);
+                    if cx >= bx && cy >= by && cx < bx + bw && cy < by + diam {
                         return Some((i, WidgetHit::RadioSelect));
                     }
                 }
@@ -2599,18 +2720,45 @@ impl WindowManager {
                 _ => {}
             }
         }
-        None
+        passive_hit
     }
 
-    fn is_over_button(&self, idx: usize) -> bool {
-        let Widget::Button(btn) = &self.widgets[idx] else { return false };
+    fn is_over_widget(&self, idx: usize) -> bool {
+        let Some(widget) = self.widgets.get(idx) else { return false };
+        if !widget.is_visible() || !widget.is_enabled() { return false; }
         let Some(win) = self.windows.iter()
-            .find(|w| w.id == btn.win_id && w.vis && !w.minimized) else { return false };
+            .find(|w| w.id == widget.win_id() && w.vis && !w.minimized) else { return false };
         let (ox, oy) = win.client_origin(self.theme.metrics());
-        self.cx >= ox + btn.rel_x
-            && self.cx < ox + btn.rel_x + btn.width as i32
-            && self.cy >= oy + btn.rel_y
-            && self.cy < oy + btn.rel_y + self.theme.metrics().button_h as i32
+        self.point_over_widget(widget, self.cx, self.cy, ox, oy)
+    }
+
+    fn point_over_widget(&self, widget: &Widget, x: i32, y: i32, ox: i32, oy: i32) -> bool {
+        let (rx, ry) = widget.rel_pos();
+        let (x_off, width, height) = match widget {
+            Widget::Label(w) => (0, if w.width == 0 { self.text_w(&w.text).max(0) as u32 } else { w.width },
+                                  self.line_h().max(1) as u32),
+            Widget::TextBox(w) => (self.label_px(w.label), w.width, self.theme.metrics().textbox_h),
+            Widget::TextArea(w) => (0, w.width, w.height),
+            Widget::CheckBox(w) => (0, self.theme.metrics().checkbox_sz
+                                      + 5 + self.text_w(w.label).max(0) as u32,
+                                    self.theme.metrics().checkbox_sz),
+            Widget::RadioButton(w) => (0, (RADIO_R * 2 + 6 + self.text_w(w.label)).max(0) as u32,
+                                       (RADIO_R * 2 + 2) as u32),
+            Widget::ComboBox(w) => (self.label_px(w.label), w.width,
+                                    self.theme.metrics().combo_h
+                                        * (w.options.len() as u32 + 1)),
+            Widget::ListBox(w) => (0, w.width, w.height),
+            Widget::Button(w) => (0, w.width, self.theme.metrics().button_h),
+            Widget::ProgressBar(w) => (self.label_px(w.label), w.width, PBAR_H),
+            Widget::Slider(w) => (self.label_px(w.label), w.width, self.theme.metrics().slider_h),
+            Widget::NumericUpDown(w) => (self.label_px(w.label),
+                                         w.width + NUD_BTN_W as u32,
+                                         self.theme.metrics().nud_h),
+            Widget::GroupBox(w) => (0, w.width, w.height),
+            Widget::Separator(w) => (0, w.width, 2),
+            Widget::QrCode(w) => (0, w.size, w.size),
+        };
+        Window::hit(x, y, (ox + rx + x_off, oy + ry, width, height))
     }
 
     fn border_raised(&self, fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32) {
@@ -2852,6 +3000,7 @@ impl WindowManager {
             Widget::NumericUpDown(w) => self.draw_nud(fb, w, ox, oy, focused, enabled),
             Widget::GroupBox(w)      => self.draw_groupbox(fb, w, ox, oy),
             Widget::Separator(w)     => self.draw_separator(fb, w, ox, oy),
+            Widget::QrCode(w)        => self.draw_qrcode(fb, w, ox, oy),
         }
     }
 
@@ -3360,6 +3509,32 @@ impl WindowManager {
         fb.fill(ax, ay + 1, sep.width, 1, fb.pack(self.theme.palette().highlight));
     }
 
+    fn draw_qrcode(&self, fb: &mut Framebuffer, qr: &QrCode, ox: i32, oy: i32) {
+        let ax = ox + qr.rel_x;
+        let ay = oy + qr.rel_y;
+        fb.fill(ax, ay, qr.size, qr.size, fb.pack(Color::WHITE));
+
+        let total_modules = qr.symbol.size() + 8;
+        let scale = qr.size as usize / total_modules;
+        let used = scale * total_modules;
+        let symbol_x = ax + ((qr.size as usize - used) / 2 + scale * 4) as i32;
+        let symbol_y = ay + ((qr.size as usize - used) / 2 + scale * 4) as i32;
+        let black = fb.pack(Color::BLACK);
+        for y in 0..qr.symbol.size() {
+            for x in 0..qr.symbol.size() {
+                if qr.symbol.module(x, y) {
+                    fb.fill(
+                        symbol_x + (x * scale) as i32,
+                        symbol_y + (y * scale) as i32,
+                        scale as u32,
+                        scale as u32,
+                        black,
+                    );
+                }
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // -----------------------------------------------------------------------
     // Text helpers
@@ -3663,6 +3838,7 @@ fn fmt_i32(n: i32, buf: &mut [u8; 16]) -> &str {
 // ---------------------------------------------------------------------------
 
 enum WidgetHit {
+    Click,
     Focus,
     TextCursor(i32, i32),  // click x, click y — focus + place cursor at click position
     Toggle,

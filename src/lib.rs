@@ -28,4 +28,5 @@ extern crate alloc;
 
 pub mod gfx;
 pub mod input;
+mod qr;
 pub mod wm;
