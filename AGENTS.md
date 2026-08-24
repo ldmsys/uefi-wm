@@ -23,7 +23,7 @@ src/wm.rs                  windows, widgets, callbacks, event loops
 demo/Cargo.toml            non-publishable demo package
 demo/src/main.rs           GOP setup and BIOS/UEFI setup demo
 demo/fonts/                fonts embedded by the demo
-demo/qemu.sh               release build and QEMU launcher
+demo/qemu.sh               release build, ISO generator, and QEMU launcher
 ```
 
 ## Commands
@@ -37,10 +37,25 @@ cargo doc -p uefi-wm --no-deps
 bash demo/qemu.sh
 bash demo/qemu.sh --vnc
 bash demo/qemu.sh --ps2
+bash demo/qemu.sh --usb-tablet
+bash demo/qemu.sh --iso
+bash demo/qemu.sh --iso=out/uefi-gui.iso
+UEFI_TARGET=aarch64-unknown-uefi bash demo/qemu.sh --iso
 ```
 
 There are no automated tests. Boot the EFI binary for runtime validation.
-`demo/qemu.sh` recognizes `--vnc` and `--ps2` in either of its first two arguments.
+`demo/qemu.sh` recognizes `--vnc`, `--ps2`, and `--usb-tablet` in either of its
+first two arguments. Its default pointer is `virtio-tablet-pci`; tablet-capable
+OVMF VirtioInput firmware exposes it through EFI Absolute Pointer. The
+`--usb-tablet` mode pins the USB HID tablet to `xhci.0` and requires a firmware
+USB tablet driver; QEMU does not itself publish UEFI protocols. The `--ps2`
+mode uses q35's built-in i8042 and must not add a duplicate `-device i8042`.
+`--iso` and `--iso=PATH` build a UEFI El Torito ISO and exit without locating
+OVMF or launching QEMU. `ISO_OUT` provides another output-path override.
+`UEFI_TARGET` accepts `x86_64-unknown-uefi` or `aarch64-unknown-uefi` and maps
+them to `BOOTX64.EFI` or `BOOTAA64.EFI`. ISO creation requires `xorriso`,
+`mkfs.vfat`, `mmd`, `mcopy`,
+and `truncate`. QEMU launch mode rejects non-x86_64 targets.
 VNC listens only on `127.0.0.1:5901`; remote access requires an explicit tunnel.
 It searches for `OVMF_CODE.fd` plus optional `OVMF_VARS.fd`, then for
 single-file `OVMF.fd`; it does not search for the `*_4M.fd` names.
@@ -93,12 +108,14 @@ Right-button transitions are produced by `InputDriver` but ignored by
 ## Input implementation
 
 `InputDriver::new` exclusively opens EFI Simple Text Input. It also attempts to
-open AbsolutePointer and SimplePointer with `GetProtocol`, then initializes a
-direct i8042 PS/2 reader.
+open AbsolutePointer and SimplePointer with `GetProtocol`. On x86/x86_64 it
+also initializes a direct i8042 PS/2 reader; other architectures compile a
+disabled no-op PS/2 backend.
 
 `find_live_abs` scans all AbsolutePointer handles and accepts the first with
-non-zero X/Y ranges and a zero Z range. This rejects zero-range ConSplitter
-stubs and non-zero-Z VMMouse handles.
+non-zero X/Y ranges. This rejects zero-range ConSplitter stubs. An optional Z
+axis is not used as a discriminator because valid drivers may advertise one;
+cursor positioning ignores Z.
 
 `read_ptr` does not select a single active source. Every call tries, in order:
 
@@ -107,14 +124,17 @@ stubs and non-zero-Z VMMouse handles.
 3. direct PS/2, when initialization succeeded
 
 Each EFI source is read once and PS/2 is drained. A batch may contain motion
-from several sources. All sources update one cached left/right state pair, so
-edges are relative to the preceding source observation. Absolute coordinates
-are scaled from their advertised minimum/range to screen dimensions; final
-cursor clamping happens in `WindowManager::handle`.
+from several sources. All sources update
+one cached left/right state pair, so edges are relative to the preceding source
+observation. Absolute coordinates are scaled from their advertised
+minimum/range to screen dimensions; final cursor clamping happens in
+`WindowManager::handle`.
 
-The direct PS/2 path owns ports `0x60` and `0x64`, expects the `0xFA` response to
-enable-reporting command `0xF4`, drains three-byte packets, ignores overflowed
-packets, and reverses the packet Y delta. Failed initialization disables polling.
+On x86/x86_64, the direct PS/2 path owns ports `0x60` and `0x64`, expects the
+`0xFA` response to enable-reporting command `0xF4`, drains three-byte packets,
+ignores overflowed packets, and reverses the packet Y delta. Failed
+initialization disables polling. Other architectures use a disabled no-op
+backend and rely on EFI pointer protocols.
 
 The public diagnostics mean:
 

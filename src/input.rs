@@ -7,9 +7,10 @@
 //! update the same cached button state, so edges are relative to the preceding
 //! observation even when it came from another source.
 //!
-//! The direct PS/2 path uses port `0x64` for status/commands and `0x60` for
-//! data. It is disabled when initialization does not receive a `0xFA`
-//! acknowledgement from the mouse.
+//! On x86 and x86_64, the direct PS/2 path uses port `0x64` for
+//! status/commands and `0x60` for data. It is disabled when initialization does
+//! not receive a `0xFA` acknowledgement from the mouse. On other architectures
+//! the direct PS/2 backend is a disabled no-op; EFI protocols remain available.
 
 extern crate alloc;
 
@@ -62,6 +63,7 @@ impl AbsolutePointer {
 /// The i8042 has two channels: keyboard (IRQ 1) and mouse/auxiliary (IRQ 12).
 /// Relevant status-register (`0x64`) bits are 0 (output full), 1 (input full),
 /// and 5 (output came from the auxiliary channel).
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 struct Ps2Mouse {
     /// Partial packet accumulator; PS/2 mouse sends 3-byte packets.
     buf:       [u8; 3],
@@ -70,6 +72,7 @@ struct Ps2Mouse {
     pub ok:    bool,
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 impl Ps2Mouse {
     const DATA:   u16 = 0x60;
     const STATUS: u16 = 0x64;
@@ -159,6 +162,22 @@ impl Ps2Mouse {
             }
         }
         out
+    }
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+struct Ps2Mouse {
+    pub ok: bool,
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+impl Ps2Mouse {
+    fn new() -> Self {
+        Self { ok: false }
+    }
+
+    fn poll(&mut self) -> Vec<(i32, i32, u8)> {
+        Vec::new()
     }
 }
 
@@ -257,7 +276,7 @@ impl InputDriver {
         let kbd = boot::open_protocol_exclusive::<Input>(kbd_h)
             .expect("cannot open keyboard");
 
-        // Prefer absolute pointer (usb-tablet, no QEMU mouse-grab required).
+        // Prefer any live absolute pointer published by the firmware.
         //
         // OVMF registers a ConSplitter stub AbsolutePointer with mode range = 0
         // before any USB device is enumerated.  get_handle_for_protocol returns
@@ -304,9 +323,10 @@ impl InputDriver {
         let rel_found = rel.is_some();
         let abs_rx_init = abs_rx;
 
-        // Direct PS/2 mouse — fallback when OVMF has no mouse drivers.
+        // Direct PS/2 mouse — fallback when firmware has no mouse drivers.
         let ps2 = Ps2Mouse::new();
         let ps2_found = ps2.ok;
+
         let ptr_found = ptr_found || ps2_found;
 
         Self {
@@ -329,8 +349,8 @@ impl InputDriver {
     }
 
     // Scan all Absolute Pointer handles and take the first with nonzero X/Y
-    // ranges and a zero Z range. This rejects zero-range ConSplitter stubs and
-    // the nonzero-Z VMMouse handle.
+    // ranges. Z is an optional axis and is not a reliable device discriminator:
+    // valid pointer drivers may advertise it even though this crate uses only X/Y.
     fn find_live_abs() -> Option<boot::ScopedProtocol<AbsolutePointer>> {
         use uefi::boot::SearchType;
         use uefi_raw::protocol::console::AbsolutePointerProtocol;
@@ -356,9 +376,8 @@ impl InputDriver {
             let mode = proto.mode();
             let rx = mode.absolute_max_x.saturating_sub(mode.absolute_min_x);
             let ry = mode.absolute_max_y.saturating_sub(mode.absolute_min_y);
-            let rz = mode.absolute_max_z.saturating_sub(mode.absolute_min_z);
-            // Skip ConSplitter stub (rx = 0) and VMMouse (rz > 0, ISA-based).
-            if rx > 0 && ry > 0 && rz == 0 {
+            // Skip zero-range ConSplitter stubs, but accept optional Z axes.
+            if rx > 0 && ry > 0 {
                 return Some(proto);
             }
         }

@@ -6,16 +6,109 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# Build
+# Output mode
 # ---------------------------------------------------------------------------
-cargo build --release -p uefi-gui-demo
-EFI=target/x86_64-unknown-uefi/release/uefi-gui.efi
+ISO_ONLY=false
+ISO_OUT="${ISO_OUT:-demo/uefi-gui.iso}"
+UEFI_TARGET="${UEFI_TARGET:-x86_64-unknown-uefi}"
+for arg in "$@"; do
+    case "$arg" in
+        --iso)
+            ISO_ONLY=true
+            ;;
+        --iso=*)
+            ISO_ONLY=true
+            ISO_OUT=${arg#--iso=}
+            if [ -z "$ISO_OUT" ]; then
+                echo "ERROR: --iso= requires a non-empty output path."
+                exit 2
+            fi
+            ;;
+    esac
+done
+
+case "$UEFI_TARGET" in
+    x86_64-unknown-uefi)
+        BOOT_EFI=BOOTX64.EFI
+        ;;
+    aarch64-unknown-uefi)
+        BOOT_EFI=BOOTAA64.EFI
+        ;;
+    *)
+        echo "ERROR: unsupported UEFI_TARGET: $UEFI_TARGET"
+        echo "Supported: x86_64-unknown-uefi, aarch64-unknown-uefi"
+        exit 2
+        ;;
+esac
+
+if ! $ISO_ONLY && [ "$UEFI_TARGET" != "x86_64-unknown-uefi" ]; then
+    echo "ERROR: QEMU launch mode supports only x86_64-unknown-uefi."
+    echo "Use --iso to export $UEFI_TARGET for another platform."
+    exit 2
+fi
+
+if $ISO_ONLY; then
+    missing_tools=""
+    for tool in xorriso mkfs.vfat mmd mcopy truncate; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing_tools="$missing_tools $tool"
+        fi
+    done
+    if [ -n "$missing_tools" ]; then
+        echo "ERROR: ISO generation requires these missing tools:$missing_tools"
+        echo "Install with: sudo apt install xorriso dosfstools mtools"
+        echo "              sudo dnf install xorriso dosfstools mtools"
+        exit 1
+    fi
+fi
 
 # ---------------------------------------------------------------------------
-# Assemble a minimal ESP (FAT image via QEMU's built-in vvfat driver)
+# Build
+# ---------------------------------------------------------------------------
+cargo build --release -p uefi-gui-demo --target "$UEFI_TARGET"
+EFI="target/$UEFI_TARGET/release/uefi-gui.efi"
+
+# ---------------------------------------------------------------------------
+# Optionally generate a UEFI-bootable ISO and stop before locating OVMF/QEMU.
+# The El Torito EFI image is a FAT filesystem containing the removable-media
+# architecture-specific EFI/BOOT/BOOT*.EFI path. ISO_OUT or --iso=PATH selects
+# the output path.
+# ---------------------------------------------------------------------------
+if $ISO_ONLY; then
+    ISO_TMP=$(mktemp -d /tmp/uefi-gui-iso_XXXXXX)
+    cleanup_iso() {
+        rm -rf -- "$ISO_TMP"
+    }
+    trap cleanup_iso EXIT
+
+    ISO_ROOT="$ISO_TMP/root"
+    ESP_IMAGE="$ISO_ROOT/EFI/BOOT/efiboot.img"
+    mkdir -p "$ISO_ROOT/EFI/BOOT"
+    truncate -s 4M "$ESP_IMAGE"
+    mkfs.vfat -n UEFI_BOOT "$ESP_IMAGE" >/dev/null
+    mmd -i "$ESP_IMAGE" ::/EFI ::/EFI/BOOT
+    mcopy -i "$ESP_IMAGE" "$EFI" "::/EFI/BOOT/$BOOT_EFI"
+
+    # Also include the executable as a normal ISO file for inspection/copying.
+    cp "$EFI" "$ISO_ROOT/EFI/BOOT/$BOOT_EFI"
+    mkdir -p "$(dirname -- "$ISO_OUT")"
+    xorriso -as mkisofs \
+        -R -J \
+        -V UEFI_GUI \
+        -e EFI/BOOT/efiboot.img \
+        -no-emul-boot \
+        -o "$ISO_OUT" \
+        "$ISO_ROOT"
+
+    echo "UEFI bootable ISO ($UEFI_TARGET, $BOOT_EFI): $ISO_OUT"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Assemble a minimal ESP directory for QEMU's built-in vvfat driver.
 # ---------------------------------------------------------------------------
 mkdir -p demo/esp/EFI/BOOT
-cp "$EFI" demo/esp/EFI/BOOT/BOOTX64.EFI
+cp "$EFI" "demo/esp/EFI/BOOT/$BOOT_EFI"
 
 # ---------------------------------------------------------------------------
 # Locate OVMF firmware
@@ -53,21 +146,25 @@ KVM=""
 #[ -c /dev/kvm ] && KVM="-enable-kvm -cpu host"
 
 # ---------------------------------------------------------------------------
-# Mouse device selection
-#   default   : USB tablet via legacy USB (EFI_ABSOLUTE_POINTER_PROTOCOL).
-#               -usb makes QEMU add an ICH9 EHCI controller and automatically
-#               selects the tablet as the active absolute pointer for VNC events.
-#   --ps2     : PS/2 mouse via i8042 (EFI_SIMPLE_POINTER_PROTOCOL).
-#               Use this if AbsolutePointer still shows no reads.
+# Pointer device selection
+#   default       : virtio tablet for OVMF builds with tablet-capable
+#                   VirtioInputDxe.
+#   --usb-tablet  : QEMU USB HID tablet on the existing xHCI controller. This
+#                   requires firmware with a USB HID tablet DXE driver; stock
+#                   OVMF builds commonly enumerate it without publishing a
+#                   pointer protocol.
+#   --ps2         : q35's built-in i8042 / the library's direct PS/2 fallback.
 # ---------------------------------------------------------------------------
-LEGACY_USB=""
-MOUSE_DEV="-device usb-tablet"
+POINTER_DEV="-device virtio-tablet-pci"
 if [ "${1:-}" = "--ps2" ] || [ "${2:-}" = "--ps2" ]; then
-    MOUSE_DEV="-device i8042"   # PS/2 controller; QEMU auto-connects a PS/2 mouse
-    echo "Mouse: PS/2 (EFI_SIMPLE_POINTER_PROTOCOL)"
+    # q35 includes i8042 even with -nodefaults; adding one would duplicate it.
+    POINTER_DEV=""
+    echo "Pointer: q35 built-in PS/2 (EFI Simple Pointer or direct i8042 fallback)"
+elif [ "${1:-}" = "--usb-tablet" ] || [ "${2:-}" = "--usb-tablet" ]; then
+    POINTER_DEV="-device usb-tablet,bus=xhci.0"
+    echo "Pointer: USB tablet on xHCI (requires a firmware USB tablet driver)"
 else
-    LEGACY_USB="-usb"           # required to attach usb-tablet to legacy EHCI
-    echo "Mouse: USB tablet on legacy EHCI (EFI_ABSOLUTE_POINTER_PROTOCOL)"
+    echo "Pointer: virtio tablet (requires tablet-capable OVMF VirtioInput)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -106,8 +203,7 @@ qemu-system-x86_64 \
     -device VGA \
     -device qemu-xhci,id=xhci \
     -device usb-kbd,bus=xhci.0 \
-    ${LEGACY_USB} \
-    ${MOUSE_DEV} \
+    ${POINTER_DEV} \
     $DISPLAY_FLAGS \
     -serial stdio \
     -nodefaults \

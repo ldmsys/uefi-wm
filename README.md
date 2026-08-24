@@ -26,6 +26,7 @@ rustup toolchain install nightly
 rustup component add rust-src llvm-tools-preview --toolchain nightly
 rustup target add x86_64-unknown-uefi --toolchain nightly
 sudo apt install qemu-system-x86 ovmf
+# Optional ISO export: sudo apt install xorriso dosfstools mtools
 ```
 
 ## Build and run
@@ -38,7 +39,11 @@ cargo doc -p uefi-wm --no-deps
 
 bash demo/qemu.sh          # GTK display
 bash demo/qemu.sh --vnc    # loopback-only VNC display :1, TCP port 5901
-bash demo/qemu.sh --ps2    # replace the USB tablet with an explicit i8042 device
+bash demo/qemu.sh --ps2    # use q35's built-in i8042 instead of a tablet
+bash demo/qemu.sh --usb-tablet # test a USB tablet with compatible firmware
+bash demo/qemu.sh --iso    # create demo/uefi-gui.iso without launching QEMU
+bash demo/qemu.sh --iso=out/uefi-gui.iso # choose the ISO output path
+UEFI_TARGET=aarch64-unknown-uefi bash demo/qemu.sh --iso
 ```
 
 VNC binds to `127.0.0.1`; use an authenticated tunnel if access from another
@@ -52,9 +57,22 @@ The binaries are written to:
 `demo/qemu.sh` builds the release binary, copies it to
 `demo/esp/EFI/BOOT/BOOTX64.EFI`, finds either `OVMF_CODE.fd` (with
 `OVMF_VARS.fd`) or the single-file `OVMF.fd`, and launches a q35 VM. It uses a
-USB keyboard on xHCI and, by default, a USB tablet on legacy USB. `--ps2`
-instead passes `-device i8042`. The application still probes all pointer paths
-that are available at runtime.
+USB keyboard on xHCI and, by default, a virtio tablet. OVMF builds with
+tablet-capable `VirtioInputDxe` expose that device through EFI Absolute Pointer.
+`--ps2` instead uses q35's built-in i8042 (which remains present under
+`-nodefaults`); it does not add a duplicate controller. `--usb-tablet` attaches
+QEMU's USB HID tablet explicitly to xHCI. A USB tablet becomes usable only when
+the firmware contains a matching HID tablet driver; QEMU's absolute host
+coordinates alone do not create an EFI Absolute Pointer protocol.
+
+`--iso` stops after producing a UEFI-bootable ISO. The ISO contains a FAT El
+Torito EFI system image plus a loose executable in the ISO filesystem. Set
+`UEFI_TARGET` to `x86_64-unknown-uefi` (the default) or
+`aarch64-unknown-uefi`; the generator selects `BOOTX64.EFI` or
+`BOOTAA64.EFI` respectively. Set `ISO_OUT` or use `--iso=PATH` to choose the
+output location. ISO generation uses `xorriso` as the ISO authoring tool,
+`mkfs.vfat` from `dosfstools`, and the `mtools` commands `mmd` and `mcopy`; it
+does not require QEMU or OVMF. QEMU launch mode remains x86_64-only.
 
 There are no tests in the workspace. Runtime behavior must be verified by
 booting the EFI image; `cargo check` and `cargo doc` cover compilation and
@@ -278,19 +296,22 @@ then probes three pointer paths:
 
 1. the first usable EFI Absolute Pointer handle;
 2. one EFI Simple Pointer handle;
-3. direct i8042 PS/2 port I/O.
+3. direct i8042 PS/2 port I/O on x86/x86_64.
 
-Absolute Pointer handles with a zero X/Y range are rejected, as are handles
-with a non-zero Z range. On every `read_ptr` call, all successfully initialized
-sources are polled in that order (one read per EFI protocol, a full drain for
-PS/2). Movement events from multiple sources may therefore appear in one batch.
-All sources update one pair of cached button states, so an edge is relative to
-the preceding observation even when that observation came from another source.
+Absolute Pointer handles with a zero X/Y range are rejected. An optional Z axis
+is accepted but ignored because cursor positioning uses only X and Y. On every
+`read_ptr` call, all successfully initialized sources are polled in that order
+(one read per EFI protocol, a full drain for PS/2). Movement events from multiple
+sources may therefore appear in one batch. All sources update one pair of cached
+button states, so an edge is relative to the preceding observation even when
+that observation came from another source.
 
-The direct PS/2 driver accepts three-byte packets, discards packets with either
-overflow bit, converts PS/2 Y to screen Y, and is disabled if initialization
-does not return the `0xFA` acknowledgement. The `RightButton` event is emitted
-but the window manager currently ignores it.
+On x86/x86_64, the direct PS/2 driver accepts three-byte packets, discards
+packets with either overflow bit, converts PS/2 Y to screen Y, and is disabled
+if initialization does not return the `0xFA` acknowledgement. Other
+architectures use a disabled no-op backend and retain the architecture-neutral
+EFI pointer paths. The `RightButton` event is emitted but the window manager
+currently ignores it.
 
 ## Framebuffer behavior
 
