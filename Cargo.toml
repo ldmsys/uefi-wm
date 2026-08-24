@@ -1,7 +1,13 @@
+[workspace]
+members  = ["demo"]
+default-members = [".", "demo"]
+resolver = "2"
+
 [package]
 name    = "uefi-wm"
 version = "0.1.0"
 edition = "2021"
+exclude = ["demo/", "AGENTS.md"]
 
 [lib]
 name = "uefi_wm"
@@ -13,3 +19,11 @@ path = "src/lib.rs"
 uefi     = { version = "0.33", features = ["alloc"] }
 uefi-raw = "0.9"
 fontdue  = { version = "0.9.3", default-features = false, features = ["hashbrown"] }
+
+[profile.release]
+opt-level = "s"
+panic     = "abort"
+strip     = true
+
+[profile.dev]
+panic = "abort"
