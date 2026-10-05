@@ -113,6 +113,8 @@
 //! };
 //! boot::set_timer(&frame_timer, TimerTrigger::Periodic(166_670)).unwrap();
 //! let timer_slot = drv.wait_events().len(); // standard loop assumes keyboard is slot 0
+//! wm.render(&mut fb);
+//! fb.present_to(&mut gop_fb, gop_stride);
 //!
 //! loop {
 //!     let mut wait_buf = drv.wait_events();
@@ -121,6 +123,7 @@
 //!
 //!     let events = if fired == 0 { drv.read_keys() } else { drv.read_ptr() };
 //!
+//!     if events.is_empty() { continue; }
 //!     if wm.handle(&events, &mut fb, &mut drv, &mut gop_fb, gop_stride) { break; }
 //!     wm.render(&mut fb);
 //!     fb.present_to(&mut gop_fb, gop_stride);
@@ -519,7 +522,7 @@ pub struct EventCtx<'a, 'gop> {
     /// [`Framebuffer::text_aa`], etc.  The next call to [`WindowManager::render`]
     /// redraws the full scene and will overwrite any pixels you set, so call
     /// [`EventCtx::present`] immediately if you need the user to see the change
-    /// before the next frame.
+    /// before the next normal render.
     pub fb:         &'a mut Framebuffer,
     /// Input and GOP access remain private; use [`Self::present`] to blit.
     drv:            &'a mut InputDriver,
@@ -530,8 +533,8 @@ pub struct EventCtx<'a, 'gop> {
 impl EventCtx<'_, '_> {
     /// Blit the back-buffer to the GOP framebuffer immediately.
     ///
-    /// [`WindowManager::run`] already calls this once per frame after
-    /// [`WindowManager::render`].  Call `present()` inside a callback only when
+    /// [`WindowManager::run`] already calls this after each input-driven
+    /// [`WindowManager::render`]. Call `present()` inside a callback only when
     /// you need the user to see an interim state — for example, a "working…"
     /// overlay drawn to [`EventCtx::fb`] before a long-running operation starts.
     pub fn present(&mut self) {
@@ -1650,22 +1653,25 @@ impl WindowManager {
     /// Sets the enabled flag on an interactive widget.
     ///
     /// Disabled widgets are grayed, skipped by hit testing, and skipped by focus
-    /// cycling. This method does not clear existing focus; keyboard routing for
-    /// an already-focused widget does not consistently consult the enabled flag.
-    /// Decorative widget handles are accepted but ignored.
+    /// cycling. Disabling the focused widget moves focus to the next enabled,
+    /// visible focusable widget in the same window, or clears focus if none
+    /// exists. Decorative widget handles are accepted but ignored.
     pub fn widget_set_enabled(&mut self, id: impl Into<WidgetId>, enabled: bool) {
         let idx = id.into().idx();
-        match self.widgets.get_mut(idx) {
-            Some(Widget::TextBox(w))       => w.enabled = enabled,
-            Some(Widget::TextArea(w))      => w.enabled = enabled,
-            Some(Widget::CheckBox(w))      => w.enabled = enabled,
-            Some(Widget::RadioButton(w))   => w.enabled = enabled,
-            Some(Widget::ComboBox(w))      => w.enabled = enabled,
-            Some(Widget::ListBox(w))       => w.enabled = enabled,
-            Some(Widget::Button(w))        => w.enabled = enabled,
-            Some(Widget::Slider(w))        => w.enabled = enabled,
-            Some(Widget::NumericUpDown(w)) => w.enabled = enabled,
-            _ => {}
+        let interactive = match self.widgets.get_mut(idx) {
+            Some(Widget::TextBox(w))       => { w.enabled = enabled; true }
+            Some(Widget::TextArea(w))      => { w.enabled = enabled; true }
+            Some(Widget::CheckBox(w))      => { w.enabled = enabled; true }
+            Some(Widget::RadioButton(w))   => { w.enabled = enabled; true }
+            Some(Widget::ComboBox(w))      => { w.enabled = enabled; true }
+            Some(Widget::ListBox(w))       => { w.enabled = enabled; true }
+            Some(Widget::Button(w))        => { w.enabled = enabled; true }
+            Some(Widget::Slider(w))        => { w.enabled = enabled; true }
+            Some(Widget::NumericUpDown(w)) => { w.enabled = enabled; true }
+            _ => false,
+        };
+        if interactive && !enabled && self.focused_widget == Some(idx) {
+            self.focused_widget = self.next_focusable_after(idx);
         }
     }
 
@@ -1715,11 +1721,14 @@ impl WindowManager {
 
     /// Drives the standard event loop until input or a callback requests exit.
     ///
-    /// Creates an approximately 60 Hz timer, polls input via [`InputDriver`], and calls
-    /// [`WindowManager::handle`] then [`WindowManager::render`] each tick. Blocks until exit.
+    /// Creates an approximately 60 Hz timer for polling pointer sources that do
+    /// not expose wait events. The desktop is rendered once initially and then
+    /// only after a non-empty input batch, rather than on every timer tick.
+    /// Blocks until exit.
+    ///
     /// Escape always exits. `q` or `Q` exits only when no widget is focused, and
     /// a callback can exit by setting [`EventCtx::quit`]. Closing the final
-    /// visible window does not end the loop.
+    /// visible window also ends the loop.
     ///
     /// Consumes `gop_fb`, keeping its borrow of the scoped GOP protocol valid
     /// for the entire loop. `gop_stride` is measured in pixels.
@@ -1737,6 +1746,10 @@ impl WindowManager {
 
         let timer_slot = drv.wait_events().len();
 
+        if !self.has_visible_windows() { return; }
+        self.render(fb);
+        fb.present_to(&mut gop_fb, gop_stride);
+
         loop {
             let mut wait_buf = drv.wait_events();
             wait_buf.push(unsafe { frame_timer.unsafe_clone() });
@@ -1748,6 +1761,7 @@ impl WindowManager {
                 drv.read_ptr()
             };
 
+            if events.is_empty() { continue; }
             if self.handle(&events, fb, drv, &mut gop_fb, gop_stride) { break; }
 
             self.render(fb);
@@ -1757,9 +1771,11 @@ impl WindowManager {
 
     /// Processes one batch of input events and reports whether the app should exit.
     ///
-    /// Call once per frame after [`InputDriver::read_keys`] or [`InputDriver::read_ptr`].
-    /// Right-button events are ignored. The GOP framebuffer and stride are retained
-    /// only in callback contexts, where [`EventCtx::present`] or
+    /// Call for each non-empty batch returned by [`InputDriver::read_keys`] or
+    /// [`InputDriver::read_ptr`].
+    /// Right-button events are ignored. The method returns `true` after the
+    /// final visible window is closed. The GOP framebuffer and stride are
+    /// retained only in callback contexts, where [`EventCtx::present`] or
     /// [`WindowManager::message_box`] may use them.
     ///
     /// See the module-level *Custom event loop* example for the dispatch pattern.
@@ -1821,7 +1837,7 @@ impl WindowManager {
                 _ => {}
             }
         }
-        false
+        !self.has_visible_windows()
     }
 
     /// Displays a modal dialog and blocks until mouse or keyboard dismissal.
@@ -1831,8 +1847,10 @@ impl WindowManager {
     /// the UI is frozen. A button returns on left-button press; Enter chooses
     /// OK/Yes, and Escape returns [`MsgBoxResult::No`] for either layout.
     ///
-    /// `title` and `text` must have static lifetimes. The fixed 360 × 140 dialog
-    /// draws `text` as one unwrapped line.
+    /// `title` and `text` must have static lifetimes. The dialog is 360 pixels
+    /// wide, wraps body text at word boundaries (splitting an overlong word
+    /// when necessary), honors explicit newlines, and grows vertically for
+    /// additional lines.
     ///
     /// # Example
     ///
@@ -2286,21 +2304,61 @@ impl WindowManager {
 
     fn cycle_focus(&mut self) {
         let win_id = match self.windows.iter().rev().find(|w| w.vis) {
-            Some(w) => w.id, None => return,
+            Some(w) if !w.minimized => w.id,
+            None => {
+                self.focused_widget = None;
+                return;
+            }
+            Some(_) => {
+                self.focused_widget = None;
+                return;
+            }
         };
         let candidates: Vec<usize> = self.widgets.iter().enumerate()
             .filter(|(_, w)| w.win_id() == win_id && w.is_focusable()
                           && w.is_visible() && w.is_enabled())
             .map(|(i, _)| i).collect();
-        if candidates.is_empty() { return; }
+        if candidates.is_empty() {
+            self.focused_widget = None;
+            return;
+        }
         let next = match self.focused_widget {
             Some(cur) => {
-                let pos = candidates.iter().position(|&i| i == cur).unwrap_or(0);
-                candidates[(pos + 1) % candidates.len()]
+                candidates.iter().position(|&i| i == cur)
+                    .map_or(candidates[0], |pos| candidates[(pos + 1) % candidates.len()])
             }
             None => candidates[0],
         };
         self.focused_widget = Some(next);
+    }
+
+    fn next_focusable_after(&self, current: usize) -> Option<usize> {
+        let win_id = self.widgets.get(current)?.win_id();
+        (1..=self.widgets.len())
+            .map(|offset| (current + offset) % self.widgets.len())
+            .find(|&idx| {
+                let widget = &self.widgets[idx];
+                widget.win_id() == win_id
+                    && widget.is_focusable()
+                    && widget.is_visible()
+                    && widget.is_enabled()
+            })
+    }
+
+    fn first_focusable_in_top_window(&self) -> Option<usize> {
+        let window = self.windows.iter().rev().find(|window| window.vis)?;
+        if window.minimized { return None; }
+        let win_id = window.id;
+        self.widgets.iter().position(|widget| {
+            widget.win_id() == win_id
+                && widget.is_focusable()
+                && widget.is_visible()
+                && widget.is_enabled()
+        })
+    }
+
+    fn has_visible_windows(&self) -> bool {
+        self.windows.iter().any(|window| window.vis)
     }
 
     // -----------------------------------------------------------------------
@@ -2421,7 +2479,17 @@ impl WindowManager {
         for i in (0..self.windows.len()).rev() {
             let w = &self.windows[i];
             if !w.vis { continue; }
-            if w.hit_close(cx, cy, self.theme.metrics()) { self.windows[i].vis = false; return None; }
+            if w.hit_close(cx, cy, self.theme.metrics()) {
+                let closed_id = self.windows[i].id;
+                self.windows[i].vis = false;
+                if self.focused_widget
+                    .and_then(|idx| self.widgets.get(idx))
+                    .is_some_and(|widget| widget.win_id() == closed_id)
+                {
+                    self.focused_widget = self.first_focusable_in_top_window();
+                }
+                return None;
+            }
             if w.hit_minimize(cx, cy, self.theme.metrics()) {
                 self.windows[i].minimized = !self.windows[i].minimized; return None;
             }
@@ -2789,8 +2857,8 @@ impl WindowManager {
 
     /// Draws the desktop, visible windows and widgets, and cursor into `fb`.
     ///
-    /// Call once per frame after [`WindowManager::handle`]. Flush to the screen with
-    /// [`Framebuffer::present_to`].
+    /// Call after [`WindowManager::handle`] when an input batch may have changed
+    /// the scene. Flush to the screen with [`Framebuffer::present_to`].
     pub fn render(&self, fb: &mut Framebuffer) {
         self.render_base(fb);
         if self.theme.is_modern() {
@@ -2803,10 +2871,10 @@ impl WindowManager {
     fn render_base(&self, fb: &mut Framebuffer) {
         fb.fill(0, 0, fb.width(), fb.height(), fb.pack(self.theme.palette().desktop));
 
-        let wn = self.windows.len();
+        let focused_window = self.windows.iter().rposition(|window| window.vis);
         for (i, win) in self.windows.iter().enumerate() {
             if !win.vis { continue; }
-            let focused = i == wn - 1;
+            let focused = Some(i) == focused_window;
             self.draw_window(fb, win, focused);
             if !win.minimized {
                 for (wi, w) in self.widgets.iter().enumerate() {
@@ -2821,8 +2889,8 @@ impl WindowManager {
         for (wi, widget) in self.widgets.iter().enumerate() {
             if let Widget::ComboBox(cb) = widget {
                 if !cb.open { continue; }
-                if let Some(win) = self.windows.last()
-                    .filter(|w| w.id == cb.win_id && w.vis)
+                if let Some(win) = self.windows.iter().rev()
+                    .find(|w| w.id == cb.win_id && w.vis && !w.minimized)
                 {
                     self.draw_combo_dropdown(fb, cb, win, self.focused_widget == Some(wi));
                 }
@@ -3568,13 +3636,28 @@ fn msgbox_loop(
     palette: Palette, modern: bool,
 ) -> MsgBoxResult {
     let dw: u32 = 360;
-    let dh: u32 = 140;
+    let text_lines = wrap_msgbox_text(text, font, font_px, dw as i32 - 48);
+    let line_h = (font_px as i32 + 3).max(ascent + 2);
+    let extra_lines = u32::try_from(text_lines.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    let dh = 140u32.saturating_add(extra_lines.saturating_mul(line_h as u32));
     let dlg_x = (sw as i32 - dw as i32) / 2;
     let dlg_y = (sh as i32 - dh as i32) / 2;
+    let mut redraw = true;
 
     loop {
+        if redraw {
+            fb.pixels_mut().copy_from_slice(background);
+            draw_msgbox_frame(fb, dlg_x, dlg_y, dw, dh, title, &text_lines, buttons,
+                              font, ascent, font_px, palette, modern, *cx, *cy);
+            if modern { draw_cursor_modern(fb, *cx, *cy); }
+            else { draw_cursor(fb, *cx, *cy); }
+            fb.present_to(gop_fb, gop_stride);
+            redraw = false;
+        }
+
         let mut events = drv.read_keys();
         events.extend(drv.read_ptr());
+        if events.is_empty() { continue; }
 
         for ev in events {
             match ev {
@@ -3614,19 +3697,65 @@ fn msgbox_loop(
                 _ => {}
             }
         }
-
-        fb.pixels_mut().copy_from_slice(background);
-        draw_msgbox_frame(fb, dlg_x, dlg_y, dw, dh, title, text, buttons,
-                          font, ascent, font_px, palette, modern, *cx, *cy);
-        if modern { draw_cursor_modern(fb, *cx, *cy); }
-        else { draw_cursor(fb, *cx, *cy); }
-        fb.present_to(gop_fb, gop_stride);
+        redraw = true;
     }
+}
+
+fn wrap_msgbox_text(
+    text: &str,
+    font: &fontdue::Font,
+    font_px: f32,
+    max_width: i32,
+) -> Vec<String> {
+    let max_width = max_width.max(1);
+    let space_width = font.metrics(' ', font_px).advance_width as i32;
+    let mut lines = Vec::new();
+
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        let mut line_width = 0;
+        let mut saw_word = false;
+
+        for word in paragraph.split_whitespace() {
+            saw_word = true;
+            let word_width = Framebuffer::text_width(word, font, font_px);
+            if !line.is_empty() && line_width + space_width + word_width <= max_width {
+                line.push(' ');
+                line.push_str(word);
+                line_width += space_width + word_width;
+                continue;
+            }
+
+            if !line.is_empty() {
+                lines.push(core::mem::take(&mut line));
+                line_width = 0;
+            }
+
+            for ch in word.chars() {
+                let char_width = font.metrics(ch, font_px).advance_width as i32;
+                if !line.is_empty() && line_width + char_width > max_width {
+                    lines.push(core::mem::take(&mut line));
+                    line_width = 0;
+                }
+                line.push(ch);
+                line_width += char_width;
+            }
+        }
+
+        if !line.is_empty() {
+            lines.push(line);
+        } else if !saw_word {
+            lines.push(String::new());
+        }
+    }
+
+    if lines.is_empty() { lines.push(String::new()); }
+    lines
 }
 
 fn draw_msgbox_frame(
     fb: &mut Framebuffer, dx: i32, dy: i32, dw: u32, dh: u32,
-    title: &'static str, text: &'static str, buttons: &MsgBoxButtons,
+    title: &str, text_lines: &[String], buttons: &MsgBoxButtons,
     font: &fontdue::Font, ascent: i32, font_px: f32,
     palette: Palette, modern: bool, cursor_x: i32, cursor_y: i32,
 ) {
@@ -3653,7 +3782,19 @@ fn draw_msgbox_frame(
     fb.fill(tx, ty + title_h, tw, 1, sh);
 
     let text_base = ty + title_h + 1 + 10 + ascent;
-    fb.text_centered_aa(dx, dw, text_base, text, palette.window_text, font, font_px);
+    let line_h = (font_px as i32 + 3).max(ascent + 2);
+    for (line, text) in text_lines.iter().enumerate() {
+        let line = i32::try_from(line).unwrap_or(i32::MAX);
+        fb.text_centered_aa(
+            dx,
+            dw,
+            text_base.saturating_add(line.saturating_mul(line_h)),
+            text,
+            palette.window_text,
+            font,
+            font_px,
+        );
+    }
 
     match buttons {
         MsgBoxButtons::Ok => {

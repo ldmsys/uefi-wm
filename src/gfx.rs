@@ -7,7 +7,9 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use uefi::proto::console::gop::{FrameBuffer as GopFrameBuffer, PixelFormat};
+use uefi::proto::console::gop::{
+    FrameBuffer as GopFrameBuffer, ModeInfo, PixelBitmask, PixelFormat,
+};
 
 // ---------------------------------------------------------------------------
 // Colour
@@ -87,24 +89,138 @@ pub struct Framebuffer {
     buf:        Vec<u32>,
     width:      u32,
     height:     u32,
-    fmt:        PixelFormat,
+    encoding:   PixelEncoding,
 }
 
-/// Error returned when a software framebuffer cannot be allocated.
+#[derive(Clone, Copy, Debug)]
+enum PixelEncoding {
+    Rgb,
+    Bgr,
+    Bitmask {
+        red: Channel,
+        green: Channel,
+        blue: Channel,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Channel {
+    mask: u32,
+    shift: u32,
+    max: u32,
+}
+
+impl Channel {
+    fn new(mask: u32) -> Option<Self> {
+        if mask == 0 { return None; }
+        let shift = mask.trailing_zeros();
+        let max = mask >> shift;
+        if max & max.wrapping_add(1) != 0 { return None; }
+        Some(Self { mask, shift, max })
+    }
+
+    #[inline]
+    fn pack(self, value: u8) -> u32 {
+        let scaled = ((value as u64 * self.max as u64 + 127) / 255) as u32;
+        (scaled << self.shift) & self.mask
+    }
+
+    #[inline]
+    fn unpack(self, pixel: u32) -> u8 {
+        let value = (pixel & self.mask) >> self.shift;
+        ((value as u64 * 255 + self.max as u64 / 2) / self.max as u64) as u8
+    }
+}
+
+/// Error returned when a software framebuffer cannot be created.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FramebufferError {
     /// `width * height` cannot be represented as a `usize` pixel count.
     DimensionsOverflow,
     /// The allocator could not reserve storage for every pixel.
     AllocationFailed,
+    /// The GOP format cannot be written through a direct framebuffer.
+    ///
+    /// `Bitmask` requires [`Framebuffer::new_with_bitmask`] or
+    /// [`Framebuffer::from_mode_info`] so its channel masks are available.
+    /// `BltOnly` modes require GOP BLT operations, which this framebuffer does
+    /// not provide.
+    UnsupportedPixelFormat(PixelFormat),
+    /// A custom pixel bitmask has missing, overlapping, or non-contiguous RGB
+    /// channels.
+    InvalidPixelBitmask,
 }
 
 impl Framebuffer {
     /// Allocates a zero-filled, tightly packed `width * height` back-buffer.
     ///
+    /// This constructor accepts [`PixelFormat::Rgb`] and [`PixelFormat::Bgr`].
+    /// Use [`Self::from_mode_info`] or [`Self::new_with_bitmask`] for a GOP
+    /// `Bitmask` mode. `BltOnly` is rejected because it has no directly
+    /// writable framebuffer.
+    ///
     /// Returns an error rather than wrapping the pixel count or aborting during
     /// the initial capacity reservation.
     pub fn new(width: u32, height: u32, fmt: PixelFormat) -> Result<Self, FramebufferError> {
+        let encoding = match fmt {
+            PixelFormat::Rgb => PixelEncoding::Rgb,
+            PixelFormat::Bgr => PixelEncoding::Bgr,
+            PixelFormat::Bitmask | PixelFormat::BltOnly => {
+                return Err(FramebufferError::UnsupportedPixelFormat(fmt));
+            }
+        };
+        Self::allocate(width, height, encoding)
+    }
+
+    /// Allocates a back-buffer from complete GOP mode information.
+    ///
+    /// RGB, BGR, and valid contiguous-mask `Bitmask` modes are supported.
+    /// `BltOnly` returns [`FramebufferError::UnsupportedPixelFormat`].
+    pub fn from_mode_info(info: &ModeInfo) -> Result<Self, FramebufferError> {
+        let (width, height) = info.resolution();
+        let width = u32::try_from(width).map_err(|_| FramebufferError::DimensionsOverflow)?;
+        let height = u32::try_from(height).map_err(|_| FramebufferError::DimensionsOverflow)?;
+        match info.pixel_format() {
+            PixelFormat::Bitmask => Self::new_with_bitmask(
+                width,
+                height,
+                info.pixel_bitmask().ok_or(FramebufferError::InvalidPixelBitmask)?,
+            ),
+            fmt => Self::new(width, height, fmt),
+        }
+    }
+
+    /// Allocates a back-buffer for a GOP `Bitmask` mode.
+    ///
+    /// Each RGB mask must be non-zero and contiguous, and RGB/reserved masks
+    /// must not overlap. Components are scaled between eight-bit [`Color`]
+    /// values and the width of their corresponding GOP channels.
+    pub fn new_with_bitmask(
+        width: u32,
+        height: u32,
+        bitmask: PixelBitmask,
+    ) -> Result<Self, FramebufferError> {
+        let used = bitmask.red | bitmask.green | bitmask.blue;
+        if bitmask.red & bitmask.green != 0
+            || bitmask.red & bitmask.blue != 0
+            || bitmask.green & bitmask.blue != 0
+            || used & bitmask.reserved != 0
+        {
+            return Err(FramebufferError::InvalidPixelBitmask);
+        }
+        let encoding = PixelEncoding::Bitmask {
+            red: Channel::new(bitmask.red).ok_or(FramebufferError::InvalidPixelBitmask)?,
+            green: Channel::new(bitmask.green).ok_or(FramebufferError::InvalidPixelBitmask)?,
+            blue: Channel::new(bitmask.blue).ok_or(FramebufferError::InvalidPixelBitmask)?,
+        };
+        Self::allocate(width, height, encoding)
+    }
+
+    fn allocate(
+        width: u32,
+        height: u32,
+        encoding: PixelEncoding,
+    ) -> Result<Self, FramebufferError> {
         let width_usize = usize::try_from(width)
             .map_err(|_| FramebufferError::DimensionsOverflow)?;
         let height_usize = usize::try_from(height)
@@ -114,7 +230,7 @@ impl Framebuffer {
         let mut buf = Vec::new();
         buf.try_reserve_exact(n).map_err(|_| FramebufferError::AllocationFailed)?;
         buf.resize(n, 0);
-        Ok(Self { buf, width, height, fmt })
+        Ok(Self { buf, width, height, encoding })
     }
 
     /// Returns the visible width in pixels.
@@ -138,23 +254,30 @@ impl Framebuffer {
     // -----------------------------------------------------------------------
 
     /// Packs RGB into GOP's native `u32` byte order.
-    ///
-    /// [`PixelFormat::Rgb`] receives the RGB branch; every other variant uses
-    /// the BGR branch, including `Bitmask` and `BltOnly`.
     #[inline]
     pub fn pack(&self, c: Color) -> u32 {
-        match self.fmt {
-            PixelFormat::Rgb => ((c.b as u32) << 16) | ((c.g as u32) << 8) | (c.r as u32),
-            _                => ((c.r as u32) << 16) | ((c.g as u32) << 8) | (c.b as u32),
+        match self.encoding {
+            PixelEncoding::Rgb => {
+                ((c.b as u32) << 16) | ((c.g as u32) << 8) | (c.r as u32)
+            }
+            PixelEncoding::Bgr => {
+                ((c.r as u32) << 16) | ((c.g as u32) << 8) | (c.b as u32)
+            }
+            PixelEncoding::Bitmask { red, green, blue } => {
+                red.pack(c.r) | green.pack(c.g) | blue.pack(c.b)
+            }
         }
     }
 
     /// Unpacks a GOP-native `u32` using the same format rule as [`Self::pack`].
     #[inline]
     pub fn unpack(&self, p: u32) -> Color {
-        match self.fmt {
-            PixelFormat::Rgb => Color::rgb(p as u8, (p >> 8) as u8, (p >> 16) as u8),
-            _                => Color::rgb((p >> 16) as u8, (p >> 8) as u8, p as u8),
+        match self.encoding {
+            PixelEncoding::Rgb => Color::rgb(p as u8, (p >> 8) as u8, (p >> 16) as u8),
+            PixelEncoding::Bgr => Color::rgb((p >> 16) as u8, (p >> 8) as u8, p as u8),
+            PixelEncoding::Bitmask { red, green, blue } => {
+                Color::rgb(red.unpack(p), green.unpack(p), blue.unpack(p))
+            }
         }
     }
 

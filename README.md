@@ -69,7 +69,7 @@ bash demo/qemu.sh
 ```
 
 Press Escape to exit. You can also press `q` when no widget has keyboard focus.
-Closing every window does not exit the application.
+Closing the final visible window exits the application.
 
 Useful launch modes:
 
@@ -102,7 +102,7 @@ uefi = { version = "0.33", features = [
 
 The basic flow is:
 
-1. Open GOP and read its width, height, stride, and pixel format.
+1. Open GOP and read its current mode information and stride.
 2. Create a software `Framebuffer`, `WindowManager`, and `InputDriver`.
 3. Add windows and widgets.
 4. Hand the GOP framebuffer to `WindowManager::run`.
@@ -123,7 +123,7 @@ let info = gop.current_mode_info();
 let (mode_width, mode_height) = info.resolution();
 let (width, height) = (mode_width as u32, mode_height as u32);
 
-let mut framebuffer = Framebuffer::new(width, height, info.pixel_format())?;
+let mut framebuffer = Framebuffer::from_mode_info(&info)?;
 let mut wm = WindowManager::new(width, height, FONT, 16.0);
 let mut input = InputDriver::new(width, height);
 
@@ -144,7 +144,9 @@ wm.run(
 ```
 
 `run` keeps the GOP framebuffer guard alive for the whole event loop. GOP stride
-is measured in pixels, not bytes.
+is measured in pixels, not bytes. It renders once at startup and after input
+changes the scene; its roughly 60 Hz fallback timer polls pointer sources but
+does not repaint empty ticks.
 
 For a complete application, see [`demo/src/main.rs`](demo/src/main.rs). Build
 the public API documentation with:
@@ -220,10 +222,14 @@ hardware stride wider than the display.
 | GOP format | Packed `u32` |
 |---|---|
 | `PixelFormat::Rgb` | `(B << 16) \| (G << 8) \| R` |
-| every other format | `(R << 16) \| (G << 8) \| B` |
+| `PixelFormat::Bgr` | `(R << 16) \| (G << 8) \| B` |
+| `PixelFormat::Bitmask` | RGB components scaled and placed using the advertised masks |
 
-`Bitmask` and `BltOnly` follow the second branch; they are not specially
-implemented.
+`Framebuffer::from_mode_info` supplies the masks required by `Bitmask` modes.
+`Framebuffer::new` accepts only RGB/BGR because a bare `PixelFormat::Bitmask`
+does not contain those masks; `new_with_bitmask` is available to callers that
+already have them. `BltOnly` is rejected with `UnsupportedPixelFormat` because
+it has no directly writable framebuffer and requires GOP BLT operations.
 
 ## Build, check, and export
 
@@ -264,13 +270,8 @@ mode is x86_64-only.
 
 ## Current limitations
 
-- The event loop redraws the complete desktop at roughly 60 Hz.
-- Message-box text is one line and does not wrap.
-- Hiding the last window does not terminate the event loop.
-- Read-only text controls can still receive focus; read-only text areas can
-  still scroll.
-- Disabling the focused widget does not automatically move focus elsewhere.
-- `Bitmask` and `BltOnly` GOP modes receive the generic non-RGB packing path.
+- Right-button transitions are collected but ignored by the window manager.
+- `BltOnly` GOP modes are not supported; select a framebuffer-backed mode.
 
 See the rustdoc and source for lower-level event-loop, callback, layout, and
 input diagnostics.

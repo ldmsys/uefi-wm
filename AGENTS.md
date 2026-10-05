@@ -63,8 +63,9 @@ single-file `OVMF.fd`; it does not search for the `*_4M.fd` names.
 ## Demo startup
 
 `demo/src/main.rs` initializes UEFI helpers, exclusively opens GOP, and captures
-the dimensions, pixel format, and pixel stride while keeping the scoped
-protocol open. It then constructs:
+the current `ModeInfo`, dimensions, and pixel stride while keeping the scoped
+protocol open. It passes `ModeInfo` to `Framebuffer::from_mode_info`, then
+constructs:
 
 1. `Framebuffer`
 2. `WindowManager` with caller-owned TTF bytes
@@ -82,15 +83,18 @@ right of the detected display with a 20 px minimum inset.
 
 ## Event loop
 
-`WindowManager::run` creates a periodic 166,670 × 100 ns timer. Each iteration:
+`WindowManager::run` creates a periodic 166,670 × 100 ns timer to poll pointer
+sources that do not expose wait events. It renders and presents once before
+waiting. Each iteration then follows:
 
 ```text
 wait_events() + frame timer
     index 0 -> read_keys()
     any other index or wait error -> read_ptr()
-handle(events, framebuffer, input, GOP framebuffer, stride)
-render(framebuffer)
-present_to(GOP framebuffer, stride)
+empty batch -> wait again
+non-empty batch -> handle(events, framebuffer, input, GOP framebuffer, stride)
+                   render(framebuffer)
+                   present_to(GOP framebuffer, stride)
 ```
 
 `wait_events` pushes cached event clones in keyboard, AbsolutePointer,
@@ -98,9 +102,9 @@ SimplePointer order, omitting any unavailable event. The constructor requires a
 keyboard protocol, and normal firmware supplies its wait event, so keyboard is
 normally slot 0. Custom loops must preserve the same dispatch assumption.
 
-`handle` returns `true` for Escape, for `q`/`Q` when no widget is focused, or
-when a callback sets `EventCtx::quit`. Hiding the final window via its close
-button does not terminate the loop.
+`handle` returns `true` for Escape, for `q`/`Q` when no widget is focused, when
+a callback sets `EventCtx::quit`, or after the final visible window is hidden
+by its close button.
 
 Right-button transitions are produced by `InputDriver` but ignored by
 `WindowManager::handle`.
@@ -152,22 +156,28 @@ diagnostic taskbar in the implementation.
 
 ## Framebuffer
 
-`Framebuffer::new` returns `Result`, using checked dimension multiplication and
-fallible reservation. Its vector and dimensions are private, preserving a
-tightly packed `width * height` invariant. `width`, `height`, `pixels`, and
-`pixels_mut` provide access without permitting vector resizing. Drawing methods
-write packed GOP pixels. `fill` clips signed rectangles; `set` and `blend_pixel`
-ignore out-of-bounds coordinates. `present_to` validates the GOP stride and
-framebuffer size, then writes `width` pixels per row through UEFI's volatile
-framebuffer API. The destination stride is measured in pixels.
+`Framebuffer::new` returns `Result`, accepts direct RGB/BGR formats, and uses
+checked dimension multiplication plus fallible reservation.
+`Framebuffer::from_mode_info` additionally supports GOP `Bitmask` modes, while
+`new_with_bitmask` supports callers that already hold a `PixelBitmask`. RGB
+masks must be non-zero, contiguous, and disjoint from each other and the
+reserved mask. `BltOnly` returns `UnsupportedPixelFormat` because this toolkit
+presents through a directly writable GOP framebuffer rather than BLT.
+
+The framebuffer vector and dimensions are private, preserving a tightly packed
+`width * height` invariant. `width`, `height`, `pixels`, and `pixels_mut`
+provide access without permitting vector resizing. Drawing methods write packed
+GOP pixels. `fill` clips signed rectangles; `set` and `blend_pixel` ignore
+out-of-bounds coordinates. `present_to` validates the GOP stride and framebuffer
+size, then writes `width` pixels per row through UEFI's volatile framebuffer
+API. The destination stride is measured in pixels.
 
 Pixel packing is:
 
 - `PixelFormat::Rgb`: `(B << 16) | (G << 8) | R`
-- every other variant: `(R << 16) | (G << 8) | B`
-
-Do not describe `Bitmask` or `BltOnly` as supported specially: they follow the
-non-`Rgb` branch.
+- `PixelFormat::Bgr`: `(R << 16) | (G << 8) | B`
+- `PixelFormat::Bitmask`: each eight-bit color component is scaled to the
+  advertised channel width and shifted into its mask
 
 ## Windows, layout, and rendering
 
@@ -185,11 +195,12 @@ with blue retained as the widget accent. Public `Framebuffer::border_raised`
 and `border_sunken` primitives retain classic colors, while their `_with`
 variants accept explicit colors.
 
-Windows live in a `Vec`; the last entry is topmost/focused. Clicking a body
-removes and pushes that window to raise it. A close-button press sets `vis =
-false`; minimize toggles `minimized`; title dragging can move windows partly off
-screen. Rendering redraws the full desktop, visible windows, widgets, open combo
-drop-downs, then cursor.
+Windows live in a `Vec`; the last visible entry is topmost/focused. Clicking a
+body removes and pushes that window to raise it. A close-button press sets
+`vis = false`; minimize toggles `minimized`; title dragging can move windows
+partly off screen. Each requested render redraws the full desktop, visible
+windows, widgets, open combo drop-downs, then cursor, but the standard event
+loop does not request renders for empty timer ticks.
 
 Classic widget positions are relative to the client origin:
 
@@ -234,11 +245,11 @@ runtime variant: stale/wrong handles produce neutral getter values or no-op
 setters. Removing widgets is not implemented, so valid handles remain stable.
 
 `widget_set_enabled` affects only interactive widgets; decorative widgets are a
-no-op. Disabled widgets are skipped by hit testing and focus cycling, but the
-method does not clear current focus and several keyboard-routing branches do not
-re-check `enabled`. `widget_set_visible` covers all widget variants. Read-only
-text controls remain normally styled and focusable; a read-only text area can
-still scroll.
+no-op. Disabled widgets are skipped by hit testing and focus cycling. Disabling
+the focused widget advances focus to the next visible, enabled, focusable widget
+in that window, wrapping once, or clears focus if none exists.
+`widget_set_visible` covers all widget variants. Read-only text controls remain
+normally styled and focusable; a read-only text area can still scroll.
 
 ## Callback model
 
@@ -288,10 +299,12 @@ pixels.
 
 `WindowManager::message_box` requires callback-owned `EventCtx` and static title
 and body strings. It snapshots `render_base` without the normal cursor, then
-busy-polls `read_keys` and `read_ptr`, redraws a fixed 360 × 140 dialog, draws the
-cursor, and presents continuously. Mouse selection occurs on left-button press;
-Enter chooses OK/Yes; Escape returns `MsgBoxResult::No` for both button layouts.
-The body is drawn on one line without wrapping.
+busy-polls `read_keys` and `read_ptr`. The dialog is 360 px wide and at least
+140 px tall. Body text wraps at word boundaries within 312 px, explicit newlines
+are retained, overlong words split at character boundaries, and the dialog grows
+one line-height per extra line. It redraws and presents initially and after
+non-empty input batches. Mouse selection occurs on left-button press; Enter
+chooses OK/Yes; Escape returns `MsgBoxResult::No` for both button layouts.
 
 ## Documentation maintenance
 

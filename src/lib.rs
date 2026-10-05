@@ -11,7 +11,8 @@
 //! // font-agnostic.  Embed a TTF with include_bytes! in your application.
 //! static FONT: &[u8] = include_bytes!("path/to/font.ttf");
 //!
-//! let mut fb  = gfx::Framebuffer::new(width, height, pixel_format).unwrap();
+//! let mode_info = gop.current_mode_info();
+//! let mut fb  = gfx::Framebuffer::from_mode_info(&mode_info).unwrap();
 //! let mut wm  = wm::WindowManager::new(width, height, FONT, 16.0);
 //! wm.set_theme(wm::Theme::Dark); // Light is the default; Classic is also available.
 //! let mut drv = input::InputDriver::new(width, height);

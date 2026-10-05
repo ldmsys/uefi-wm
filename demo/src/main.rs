@@ -28,10 +28,9 @@ fn efi_main() -> Status {
     let (w, h) = info.resolution();
     let (width, height) = (w as u32, h as u32);
     let stride = info.stride();
-    let pixel_fmt = info.pixel_format();
 
-    let mut fb  = Framebuffer::new(width, height, pixel_fmt)
-        .expect("Cannot allocate software framebuffer");
+    let mut fb  = Framebuffer::from_mode_info(&info)
+        .expect("Cannot create software framebuffer for GOP mode");
     let mut wm  = WindowManager::new(width, height, FONT, FONT_PX);
     let mut drv = InputDriver::new(width, height);
 
