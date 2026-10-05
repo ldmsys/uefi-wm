@@ -9,7 +9,7 @@ cd "$REPO_ROOT"
 # Output mode
 # ---------------------------------------------------------------------------
 ISO_ONLY=false
-ISO_OUT="${ISO_OUT:-demo/uefi-gui.iso}"
+ISO_OUT="${ISO_OUT:-demo/uefi-wm.iso}"
 UEFI_TARGET="${UEFI_TARGET:-x86_64-unknown-uefi}"
 for arg in "$@"; do
     case "$arg" in
@@ -65,8 +65,8 @@ fi
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
-cargo build --release -p uefi-gui-demo --target "$UEFI_TARGET"
-EFI="target/$UEFI_TARGET/release/uefi-gui.efi"
+cargo build --release -p uefi-wm-demo --target "$UEFI_TARGET"
+EFI="target/$UEFI_TARGET/release/uefi-wm.efi"
 
 # ---------------------------------------------------------------------------
 # Optionally generate a UEFI-bootable ISO and stop before locating OVMF/QEMU.
@@ -75,7 +75,7 @@ EFI="target/$UEFI_TARGET/release/uefi-gui.efi"
 # the output path.
 # ---------------------------------------------------------------------------
 if $ISO_ONLY; then
-    ISO_TMP=$(mktemp -d /tmp/uefi-gui-iso_XXXXXX)
+    ISO_TMP=$(mktemp -d /tmp/uefi-wm-iso_XXXXXX)
     cleanup_iso() {
         rm -rf -- "$ISO_TMP"
     }

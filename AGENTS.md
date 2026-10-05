@@ -7,7 +7,7 @@ The Rust source and Cargo/shell configuration are authoritative. Keep this file,
 
 - Target: `x86_64-unknown-uefi`, `#![no_std]`, nightly Rust.
 - Root package: `uefi-wm`; Rust crate name `uefi_wm`.
-- Workspace demo package: `demo/`; package `uefi-gui-demo`, binary `uefi-gui`.
+- Workspace demo package: `demo/`; package `uefi-wm-demo`, binary `uefi-wm`.
 - `.cargo/config.toml` selects the target and builds `core`,
   `compiler_builtins`, and `alloc`.
 - The demo binary enables UEFI allocator/panic/logger features. The library
@@ -39,7 +39,7 @@ bash demo/qemu.sh --vnc
 bash demo/qemu.sh --ps2
 bash demo/qemu.sh --usb-tablet
 bash demo/qemu.sh --iso
-bash demo/qemu.sh --iso=out/uefi-gui.iso
+bash demo/qemu.sh --iso=out/uefi-wm.iso
 UEFI_TARGET=aarch64-unknown-uefi bash demo/qemu.sh --iso
 ```
 

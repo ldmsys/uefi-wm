@@ -4,10 +4,15 @@ default-members = [".", "demo"]
 resolver = "2"
 
 [package]
-name    = "uefi-wm"
-version = "0.1.0"
-edition = "2021"
-exclude = ["demo/", "AGENTS.md"]
+name        = "uefi-wm"
+version     = "0.1.0"
+edition     = "2021"
+description = "A tiny no_std window manager for UEFI graphics environments"
+license     = "MIT"
+homepage    = "https://github.com/ldmsys/uefi-wm.git"
+repository  = "https://github.com/ldmsys/uefi-wm.git"
+readme      = "README.md"
+exclude     = ["/demo", "AGENTS.md"]
 
 [lib]
 name = "uefi_wm"

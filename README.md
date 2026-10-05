@@ -36,7 +36,7 @@ The library is:
 The repository contains two packages:
 
 - `uefi-wm` at the workspace root: the reusable library (`uefi_wm` in Rust);
-- `demo/`: a complete, non-publishable UEFI application named `uefi-gui`.
+- `demo/`: a complete, non-publishable UEFI application named `uefi-wm`.
 
 ## Themes
 
@@ -248,8 +248,8 @@ cargo doc -p uefi-wm --no-deps
 
 The demo executable is written to:
 
-- `target/x86_64-unknown-uefi/debug/uefi-gui.efi` for debug builds;
-- `target/x86_64-unknown-uefi/release/uefi-gui.efi` for release builds.
+- `target/x86_64-unknown-uefi/debug/uefi-wm.efi` for debug builds;
+- `target/x86_64-unknown-uefi/release/uefi-wm.efi` for release builds.
 
 There are no automated tests yet. Runtime validation means booting the EFI
 binary, normally through `demo/qemu.sh`.
@@ -260,7 +260,7 @@ To create a bootable ISO without launching QEMU, install `xorriso`,
 ```bash
 sudo apt install xorriso dosfstools mtools
 bash demo/qemu.sh --iso
-bash demo/qemu.sh --iso=out/uefi-gui.iso
+bash demo/qemu.sh --iso=out/uefi-wm.iso
 ```
 
 Set `ISO_OUT` as another way to choose the output path. ISO export also supports
