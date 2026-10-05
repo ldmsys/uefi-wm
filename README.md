@@ -2,6 +2,12 @@
 
 A small, `no_std` window manager and GUI toolkit that runs inside UEFI.
 
+> Warning: This project is still experimental and not yet mature enough for
+> production use. The API may change in breaking ways in future releases, and
+> this software is provided without any warranty, express or implied, including
+> warranties of merchantability, fitness for a particular purpose, or
+> non-infringement.
+
 `uefi-wm` draws a floating desktop directly into a software framebuffer and
 presents it through UEFI's Graphics Output Protocol (GOP). It includes windows,
 14 widget types, mouse and keyboard input, callbacks, QR codes, and three themes.

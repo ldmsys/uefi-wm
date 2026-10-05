@@ -1,5 +1,11 @@
 //! A `no_std` UEFI GUI toolkit.
 //!
+//! # Warning
+//! This project is still experimental and not yet mature enough for production
+//! use. The API may change in breaking ways in future versions, and the software
+//! is provided without any warranty, express or implied, including warranties of
+//! merchantability, fitness for a particular purpose, or non-infringement.
+//!
 //! # Modules
 //! - [`gfx`] — software framebuffer and antialiased drawing primitives.
 //! - [`input`] — keyboard and pointer input from UEFI protocols and direct PS/2 I/O.
